@@ -1,0 +1,38 @@
+# Tailwind CSS
+tailwindcss-linux-x64
+tailwindcss-*
+node_modules/
+package-lock.json
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Vendor files - installed per environment
+vendor/
+
+# Environment files
+.env
+modules/setup/config.php
+
+# Composer executable
+composer.phar

@@ -1,0 +1,36 @@
+.font-opensans {
+    font-family: "Open Sans", sans-serif;
+}
+
+.font-prodsans {
+    font-family: "ProductSans", sans-serif;
+}
+
+.font-prodsansbold {
+    font-family: "ProductSansBold", sans-serif;
+}
+
+
+@font-face {
+    font-family: "ProductSans";
+    src: url(ProductSans-Regular.woff) format("woff");
+    font-weight: normal;
+}
+
+@font-face {
+    font-family: "ProductSansBold";
+    src: url(ProductSans-Bold.woff) format("woff");
+    font-weight: bold;
+}
+
+::-webkit-scrollbar {
+    display:none;
+}
+
+h1,h2,h3,h4,h5,h6 {
+    font-family: "ProductSansBold", sans-serif;
+}
+
+.modal-content {
+    color: #000;
+}
