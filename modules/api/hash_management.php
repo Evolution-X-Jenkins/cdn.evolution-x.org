@@ -67,8 +67,8 @@ function generateFileHash() {
     $pdo = $db->getConnection();
     
     $stmt = $pdo->prepare("
-        INSERT OR REPLACE INTO download_stat (key_path, count, sha256, md5, file_size) 
-        VALUES (?, COALESCE((SELECT count FROM download_stat WHERE key_path = ?), 0), ?, ?, ?)
+        INSERT OR REPLACE INTO download_stat (`key`, `count`, `sha256`, `md5`, `file_size`) 
+        VALUES (?, COALESCE((SELECT `count` FROM download_stat WHERE `key` = ?), 0), ?, ?, ?)
     ");
     
     $md5Hash = ($algorithm === 'md5') ? $hash : hash_file('md5', $fullPath);
@@ -122,8 +122,8 @@ function regeneratePathHashes() {
         
         // Update download_stat table with hash info
         $stmt = $pdo->prepare("
-            INSERT OR REPLACE INTO download_stat (key_path, count, sha256, md5, file_size) 
-            VALUES (?, COALESCE((SELECT count FROM download_stat WHERE key_path = ?), 0), ?, ?, ?)
+            INSERT OR REPLACE INTO download_stat (`key`, `count`, `sha256`, `md5`, `file_size`) 
+            VALUES (?, COALESCE((SELECT `count` FROM download_stat WHERE `key` = ?), 0), ?, ?, ?)
         ");
         
         $md5Hash = ($algorithm === 'md5') ? $hash : hash_file('md5', $file->getPathname());
@@ -161,10 +161,10 @@ function clearPathHashes() {
     $pdo = $db->getConnection();
     
     if ($recursive) {
-        $stmt = $pdo->prepare("UPDATE download_stat SET sha256 = NULL, md5 = NULL WHERE key_path LIKE ?");
+        $stmt = $pdo->prepare("UPDATE download_stat SET `sha256` = NULL, `md5` = NULL WHERE `key` LIKE ?");
         $stmt->execute([rtrim($path, '/') . '/%']);
     } else {
-        $stmt = $pdo->prepare("UPDATE download_stat SET sha256 = NULL, md5 = NULL WHERE key_path = ?");
+        $stmt = $pdo->prepare("UPDATE download_stat SET `sha256` = NULL, `md5` = NULL WHERE `key` = ?");
         $stmt->execute([$path]);
     }
     
@@ -189,7 +189,7 @@ function deleteFileHash() {
 
     $db = Database::getInstance();
     $pdo = $db->getConnection();
-    $stmt = $pdo->prepare("UPDATE download_stat SET sha256 = NULL, md5 = NULL WHERE key_path = ?");
+    $stmt = $pdo->prepare("UPDATE download_stat SET `sha256` = NULL, `md5` = NULL WHERE `key` = ?");
     $stmt->execute([$filepath]);
     
     echo json_encode([
@@ -209,7 +209,7 @@ function getFileHash() {
     
     if (!empty($filepath)) {
         // Get single file hash
-        $stmt = $pdo->prepare("SELECT key_path, sha256, md5, file_size, count FROM download_stat WHERE key_path = ?");
+        $stmt = $pdo->prepare("SELECT `key`, `sha256`, `md5`, `file_size`, `count` FROM download_stat WHERE `key` = ? AND (`sha256` IS NOT NULL OR `md5` IS NOT NULL)");
         $stmt->execute([$filepath]);
         $row = $stmt->fetch();
         
@@ -225,10 +225,10 @@ function getFileHash() {
     } elseif (!empty($path)) {
         // Get path hashes
         if ($recursive) {
-            $stmt = $pdo->prepare("SELECT key_path, sha256, md5, file_size, count FROM download_stat WHERE key_path LIKE ? AND (sha256 IS NOT NULL OR md5 IS NOT NULL) ORDER BY key_path");
+            $stmt = $pdo->prepare("SELECT `key`, `sha256`, `md5`, `file_size`, `count` FROM download_stat WHERE `key` LIKE ? AND (`sha256` IS NOT NULL OR `md5` IS NOT NULL) ORDER BY `key`");
             $stmt->execute([rtrim($path, '/') . '/%']);
         } else {
-            $stmt = $pdo->prepare("SELECT key_path, sha256, md5, file_size, count FROM download_stat WHERE key_path = ? AND (sha256 IS NOT NULL OR md5 IS NOT NULL)");
+            $stmt = $pdo->prepare("SELECT `key`, `sha256`, `md5`, `file_size`, `count` FROM download_stat WHERE `key` = ? AND (`sha256` IS NOT NULL OR `md5` IS NOT NULL)");
             $stmt->execute([$path]);
         }
         

@@ -25,26 +25,46 @@ class Database {
     }
     
     private function connect() {
-        // Ensure data directory exists
-        $dataDir = dirname(DB_FILE);
-        if (!is_dir($dataDir)) {
-            mkdir($dataDir, 0755, true);
+        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+            // MySQL connection
+            $dsn = "mysql:host=" . DB_HOST . ";port=" . DB_PORT . ";dbname=" . DB_NAME . ";charset=" . DB_CHARSET;
+            
+            $this->pdo = new PDO($dsn, DB_USER, DB_PASS, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::ATTR_EMULATE_PREPARES => false,
+                PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES " . DB_CHARSET
+            ]);
+        } else {
+            // SQLite connection (default)
+            // Ensure data directory exists
+            $dataDir = dirname(DB_FILE);
+            if (!is_dir($dataDir)) {
+                mkdir($dataDir, 0755, true);
+            }
+            
+            $this->pdo = new PDO('sqlite:' . DB_FILE, null, null, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::ATTR_EMULATE_PREPARES => false,
+            ]);
+            
+            // Enable WAL mode for better concurrency (SQLite only)
+            $this->pdo->exec('PRAGMA journal_mode = WAL');
+            $this->pdo->exec('PRAGMA synchronous = NORMAL');
+            $this->pdo->exec('PRAGMA cache_size = 1000');
+            $this->pdo->exec('PRAGMA temp_store = MEMORY');
         }
-        
-        $this->pdo = new PDO('sqlite:' . DB_FILE, null, null, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-        ]);
-        
-        // Enable WAL mode for better concurrency
-        $this->pdo->exec('PRAGMA journal_mode = WAL');
-        $this->pdo->exec('PRAGMA synchronous = NORMAL');
-        $this->pdo->exec('PRAGMA cache_size = 1000');
-        $this->pdo->exec('PRAGMA temp_store = MEMORY');
     }
     
     private function createTables() {
+        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+            // For MySQL, skip table creation - tables should already exist in production
+            // The production database has the correct schema with `key` column
+            return;
+        }
+        
+        // SQLite table creation (local development)
         $sql = "
             -- Download statistics (individual downloads)
             CREATE TABLE IF NOT EXISTS download_stats (

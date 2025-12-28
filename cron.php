@@ -248,10 +248,10 @@ try {
                 $download_count = $count_stmt->fetchColumn();
                 
                 $stmt = $db->getConnection()->prepare('
-                    INSERT INTO download_stat (key_path, count, md5, sha256, file_size, key)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO download_stat (key_path, count, md5, sha256, file_size)
+                    VALUES (?, ?, ?, ?, ?)
                 ');
-                $stmt->execute([$filename, $download_count, $md5, $sha256, $file_size, '']);
+                $stmt->execute([$filename, $download_count, $md5, $sha256, $file_size]);
                 
                 echo "[" . date('Y-m-d H:i:s') . "] Added new file: " . $filename . " (downloads: $download_count)\n";
                 $calculated++;
@@ -315,10 +315,10 @@ try {
                 $download_count = $count_stmt->fetchColumn() ?: 0;
                 
                 $stmt = $db->getConnection()->prepare('
-                    INSERT INTO download_stat (key_path, count, md5, sha256, file_size, key)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO download_stat (key_path, count, md5, sha256, file_size)
+                    VALUES (?, ?, ?, ?, ?)
                 ');
-                $stmt->execute([$relativePath, $download_count, $md5, $sha256, $file_size, '']);
+                $stmt->execute([$relativePath, $download_count, $md5, $sha256, $file_size]);
                 
                 echo "[" . date('Y-m-d H:i:s') . "] Added to database: " . $relativePath . " (downloads: $download_count)\n\n";
                 $added++;

@@ -154,7 +154,7 @@ class BucketCache {
         return $latest;
     }
     
-    private function readCache() {
+    public function readCache() {
         if (!file_exists($this->cache_file)) {
             return null;
         }
@@ -174,7 +174,7 @@ class BucketCache {
         file_put_contents($this->cache_file, json_encode($cache_data), LOCK_EX);
     }
     
-    private function isCacheValid($cached) {
+    public function isCacheValid($cached) {
         return (time() - $cached['timestamp']) < $this->max_age;
     }
     

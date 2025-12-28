@@ -143,17 +143,47 @@ function check_jenkins_status() {
 function check_bucket_status() {
     // Use cached bucket statistics for fast loading
     $cache = new BucketCache();
-    $stats = $cache->getBucketStats();
     
-    return [
-        'name' => 'Bucket Size',
-        'status' => $stats['status'],
-        'message' => $stats['message'],
-        'details' => [
-            'Total Files' => number_format($stats['total_files']),
-            'Total Size' => format_file_size($stats['total_size']),
-            'Directory' => $stats['path']
-        ]
-    ];
+    // Check if cache exists first
+    $cached = $cache->readCache();
+    
+    if ($cached && $cache->isCacheValid($cached)) {
+        // Return cached data
+        $stats = $cached['data'];
+        return [
+            'name' => 'Bucket Size',
+            'status' => $stats['status'],
+            'message' => $stats['message'],
+            'details' => [
+                'Total Files' => number_format($stats['total_files']),
+                'Total Size' => format_file_size($stats['total_size']),
+                'Directory' => $stats['path']
+            ]
+        ];
+    } elseif ($cached) {
+        // Return stale cache data with warning
+        $stats = $cached['data'];
+        return [
+            'name' => 'Bucket Size',
+            'status' => 'warning',
+            'message' => 'Cache outdated (cron will update)',
+            'details' => [
+                'Total Files' => number_format($stats['total_files']) . ' (stale)',
+                'Total Size' => format_file_size($stats['total_size']) . ' (stale)',
+                'Directory' => $stats['path']
+            ]
+        ];
+    } else {
+        // No cache - return calculating status
+        return [
+            'name' => 'Bucket Size',
+            'status' => 'warning',
+            'message' => 'Calculating... (check back in a few minutes)',
+            'details' => [
+                'Directory' => BASE_PATH,
+                'Note' => 'Initial calculation in progress via cron job'
+            ]
+        ];
+    }
 }
 ?>

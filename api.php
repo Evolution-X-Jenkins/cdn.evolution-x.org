@@ -74,6 +74,10 @@ function handleApiRequest() {
     switch ($endpoint) {
         case 'push':
             $result = handlePushApi($method, $pathParts);
+            // If result is null, response was already sent directly
+            if ($result === null) {
+                return; // Exit without sending another response
+            }
             if (isset($result['APICode'])) {
                 // Handle specific API codes with proper HTTP status
                 $statusMap = [

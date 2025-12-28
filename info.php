@@ -59,9 +59,12 @@ function show_info_page($relative_file_path, $full_file_path) {
     $hashes_calculating = false;
     
     try {
+        // Normalize path for database lookup (remove leading slash)
+        $db_path = ltrim($relative_file_path, '/');
+        
         // Get hashes from download_stat table
-        $stmt = $db->getConnection()->prepare('SELECT md5, sha256, file_size FROM download_stat WHERE key_path = ?');
-        $stmt->execute([$relative_file_path]);
+        $stmt = $db->getConnection()->prepare('SELECT md5, sha256, file_size FROM download_stat WHERE `key` = ?');
+        $stmt->execute([$db_path]);
         $stat_data = $stmt->fetch();
         
         if ($stat_data && !empty($stat_data['md5']) && !empty($stat_data['sha256'])) {

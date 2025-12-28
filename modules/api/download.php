@@ -136,9 +136,9 @@ function handleDownloadStatisticsApi($method, $pathParts) {
             if ($filenameFilter && !$folderFilter) {
                 // Get total for all files matching filename filter
                 $stmt = $db->getConnection()->prepare('
-                    SELECT SUM(ds.count) as total_count
+                    SELECT SUM(ds.`count`) as total_count
                     FROM download_stat ds 
-                    WHERE ds.key_path LIKE ?
+                    WHERE ds.`key` LIKE ?
                 ');
                 $stmt->execute(['%' . $filenameFilter . '%']);
                 $totalCount = $stmt->fetchColumn() ?: 0;
@@ -156,9 +156,9 @@ function handleDownloadStatisticsApi($method, $pathParts) {
             } elseif ($folderFilter && !$filenameFilter) {
                 // Get total for specific folder
                 $stmt = $db->getConnection()->prepare('
-                    SELECT SUM(ds.count) as total_count
+                    SELECT SUM(ds.`count`) as total_count
                     FROM download_stat ds 
-                    WHERE ds.key_path LIKE ?
+                    WHERE ds.`key` LIKE ?
                 ');
                 $stmt->execute([$folderFilter . '/%']);
                 $totalCount = $stmt->fetchColumn() ?: 0;
