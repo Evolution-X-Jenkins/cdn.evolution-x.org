@@ -4,7 +4,7 @@
  * Run this script periodically via crontab to maintain cache and perform maintenance tasks
  * 
  * Usage: php /path/to/cron.php
- * Crontab example: 0,15,30,45 * * * * php /home/aidan/git/php_filebrowser/cron.php >> /var/log/filebrowser_cron.log 2>&1
+ * Crontab example: 0,15,30,45 * * * * php /home/aidan/git/php_filebrowser/cron.php
  */
 
 // Prevent web access
@@ -15,7 +15,30 @@ if (isset($_SERVER['HTTP_HOST'])) {
 require_once __DIR__ . '/modules/core/bucket_cache.php';
 require_once __DIR__ . '/modules/setup/database.php';
 
-echo "[" . date('Y-m-d H:i:s') . "] Starting cron job\n";
+// Setup logging
+$logsDir = __DIR__ . '/logs';
+if (!is_dir($logsDir)) {
+    mkdir($logsDir, 0755, true);
+}
+
+$logFile = $logsDir . '/cron_' . date('Y-m-d') . '.log';
+
+/**
+ * Log message to both console and file
+ */
+function log_message($message) {
+    global $logFile;
+    $timestamp = "[" . date('Y-m-d H:i:s') . "]";
+    $logEntry = $timestamp . " " . $message . "\n";
+    
+    // Output to console
+    echo $logEntry;
+    
+    // Write to log file
+    file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
+}
+
+log_message("Starting cron job");
 
 // 1. Update bucket cache
 echo "[" . date('Y-m-d H:i:s') . "] Checking bucket cache...\n";
@@ -33,39 +56,33 @@ try {
 }
 
 // 2. Clean up old database entries
-echo "[" . date('Y-m-d H:i:s') . "] Cleaning up database...\n";
+log_message("Cleaning up database...");
 try {
     $db = Database::getInstance();
     
-    // Clean expired cache entries
-    $stmt = $db->getConnection()->prepare('DELETE FROM cache_entries WHERE expires_at < CURRENT_TIMESTAMP');
-    $stmt->execute();
-    $cleaned = $stmt->rowCount();
-    echo "[" . date('Y-m-d H:i:s') . "] Cleaned $cleaned expired cache entries\n";
+    // Check if cache_entries table exists before trying to clean it
+    $tables = $db->getConnection()->query("SHOW TABLES LIKE 'cache_entries'")->fetchAll();
+    if (!empty($tables)) {
+        $stmt = $db->getConnection()->prepare('DELETE FROM cache_entries WHERE expires_at < CURRENT_TIMESTAMP');
+        $stmt->execute();
+        $cleaned = $stmt->rowCount();
+        log_message("Cleaned $cleaned expired cache entries");
+    } else {
+        log_message("cache_entries table does not exist, skipping cleanup");
+    }
     
-    // Clean old upload sessions
-    $db->cleanupExpiredUploadSessions();
-    echo "[" . date('Y-m-d H:i:s') . "] Expired upload sessions cleaned\n";
-    
-    // Clean old log files (keep last 1000 lines)
-    if (defined('LOG_FILE') && file_exists(LOG_FILE)) {
-        $lines = file(LOG_FILE);
-        if (count($lines) > 1000) {
-            $keep_lines = array_slice($lines, -1000);
-            file_put_contents(LOG_FILE, implode('', $keep_lines), LOCK_EX);
-            $cleaned = count($lines) - 1000;
-            echo "[" . date('Y-m-d H:i:s') . "] Cleaned $cleaned old log entries\n";
-        } else {
-            echo "[" . date('Y-m-d H:i:s') . "] Log file size OK (" . count($lines) . " lines)\n";
-        }
+    // Clean old upload sessions if method exists
+    if (method_exists($db, 'cleanupExpiredUploadSessions')) {
+        $db->cleanupExpiredUploadSessions();
+        log_message("Expired upload sessions cleaned");
     }
     
 } catch (Exception $e) {
-    echo "[" . date('Y-m-d H:i:s') . "] ERROR: Database cleanup failed: " . $e->getMessage() . "\n";
+    log_message("WARNING: Database cleanup had issues: " . $e->getMessage());
 }
 
 // 3. Process hash calculation queue
-echo "[" . date('Y-m-d H:i:s') . "] Processing hash calculation queue...\n";
+log_message("Processing hash calculation queue...");
 try {
     $hash_queue_file = sys_get_temp_dir() . '/filebrowser_hash_queue.txt';
     
@@ -84,13 +101,13 @@ try {
                     try {
                         $fullPath = BASE_PATH . '/' . ltrim($filePath, '/');
                         if (file_exists($fullPath)) {
-                            echo "[" . date('Y-m-d H:i:s') . "] Calculating hashes for: $filePath\n";
-                            $hashes = $hasher->getFileHashes($filePath, ['md5', 'sha1', 'sha256']);
-                            echo "[" . date('Y-m-d H:i:s') . "] Hash calculation completed for: $filePath\n";
+                            log_message("Calculating hashes for: $filePath");
+                            $hashes = $hasher->getFileHashes($filePath, ['md5', 'sha256']);
+                            log_message("Hash calculation completed for: $filePath");
                             $processed++;
                         }
                     } catch (Exception $e) {
-                        echo "[" . date('Y-m-d H:i:s') . "] ERROR: Hash calculation failed for $filePath: " . $e->getMessage() . "\n";
+                        log_message("ERROR: Hash calculation failed for $filePath: " . $e->getMessage());
                         $processed++; // Count as processed to avoid infinite retries
                     }
                 } else {
@@ -101,31 +118,32 @@ try {
             // Write back remaining queue
             if (!empty($remaining_queue)) {
                 file_put_contents($hash_queue_file, implode("\n", $remaining_queue) . "\n", LOCK_EX);
-                echo "[" . date('Y-m-d H:i:s') . "] " . count($remaining_queue) . " files remaining in hash queue\n";
+                log_message(count($remaining_queue) . " files remaining in hash queue");
             } else {
                 unlink($hash_queue_file);
-                echo "[" . date('Y-m-d H:i:s') . "] Hash queue cleared\n";
+                log_message("Hash queue cleared");
             }
         } else {
             unlink($hash_queue_file);
         }
     } else {
-        echo "[" . date('Y-m-d H:i:s') . "] No hash calculations pending\n";
+        log_message("No hash calculations pending");
     }
 } catch (Exception $e) {
-    echo "[" . date('Y-m-d H:i:s') . "] ERROR: Hash queue processing failed: " . $e->getMessage() . "\n";
+    log_message("ERROR: Hash queue processing failed: " . $e->getMessage());
 }
 
 // 4. Validate and update hashes from download_stat table
-echo "[" . date('Y-m-d H:i:s') . "] Processing files from download statistics...\n";
+log_message("Processing files from download statistics...");
 try {
     require_once __DIR__ . '/modules/core/file_operations.php';
     $hasher = new FileHasher();
     $db = Database::getInstance();
     
     // Get ALL files from download_stat table to check file sizes and hashes
+    // Note: column is 'key', not 'key_path'
     $stmt = $db->getConnection()->prepare('
-        SELECT id, key_path, file_size, md5, sha256, count
+        SELECT id, `key`, file_size, md5, sha256, count
         FROM download_stat 
         ORDER BY count DESC
     ');
@@ -138,12 +156,12 @@ try {
     $updated = 0;
     
     foreach ($files as $file) {
-        $key_path = $file['key_path'];
+        $key_path = $file['key'];
         $fullPath = BASE_PATH . '/' . ltrim($key_path, '/');
         
         // Check if file still exists
         if (!file_exists($fullPath)) {
-            echo "[" . date('Y-m-d H:i:s') . "] File not found, skipping: " . $key_path . "\n";
+            log_message("File not found, skipping: " . $key_path);
             $removed++;
             continue;
         }
@@ -167,7 +185,7 @@ try {
         }
         
         if ($needs_update) {
-            echo "[" . date('Y-m-d H:i:s') . "] $reason, updating: " . $key_path . "\n";
+            log_message("$reason, updating: " . $key_path);
             
             try {
                 // Show progress bar before calculation
@@ -197,10 +215,10 @@ try {
                 ');
                 $stmt->execute([$md5, $sha256, $currentSize, $file['id']]);
                 
-                echo "[" . date('Y-m-d H:i:s') . "] Updated: " . $key_path . "\n\n";
+                log_message("Updated: " . $key_path);
                 $calculated++;
             } catch (Exception $e) {
-                echo "[" . date('Y-m-d H:i:s') . "] ERROR: Failed to update " . $key_path . ": " . $e->getMessage() . "\n";
+                log_message("ERROR: Failed to update " . $key_path . ": " . $e->getMessage());
             }
         }
         
@@ -208,11 +226,11 @@ try {
     }
     
     // Also check for new files that have been downloaded but not yet in download_stat
-    echo "[" . date('Y-m-d H:i:s') . "] Checking for new downloaded files...\n";
+    log_message("Checking for new downloaded files...");
     $stmt = $db->getConnection()->prepare('
         SELECT DISTINCT filename 
         FROM download_stats 
-        WHERE filename NOT IN (SELECT key_path FROM download_stat)
+        WHERE filename NOT IN (SELECT `key` FROM download_stat)
     ');
     $stmt->execute();
     $new_files = $stmt->fetchAll();
@@ -222,7 +240,7 @@ try {
         $fullPath = BASE_PATH . '/' . ltrim($filename, '/');
         
         if (file_exists($fullPath)) {
-            echo "[" . date('Y-m-d H:i:s') . "] Adding new file to download_stat: " . $filename . "\n";
+            log_message("Adding new file to download_stat: " . $filename);
             try {
                 $file_size = filesize($fullPath);
                 
@@ -248,26 +266,26 @@ try {
                 $download_count = $count_stmt->fetchColumn();
                 
                 $stmt = $db->getConnection()->prepare('
-                    INSERT INTO download_stat (key_path, count, md5, sha256, file_size)
+                    INSERT INTO download_stat (`key`, count, md5, sha256, file_size)
                     VALUES (?, ?, ?, ?, ?)
                 ');
                 $stmt->execute([$filename, $download_count, $md5, $sha256, $file_size]);
                 
-                echo "[" . date('Y-m-d H:i:s') . "] Added new file: " . $filename . " (downloads: $download_count)\n";
+                log_message("Added new file: " . $filename . " (downloads: $download_count)");
                 $calculated++;
             } catch (Exception $e) {
-                echo "[" . date('Y-m-d H:i:s') . "] ERROR: Failed to add new file " . $filename . ": " . $e->getMessage() . "\n";
+                log_message("ERROR: Failed to add new file " . $filename . ": " . $e->getMessage());
             }
         }
     }
     
     // Now scan the entire filesystem to find files not in download_stat
-    echo "[" . date('Y-m-d H:i:s') . "] Scanning filesystem for files not in download_stat...\n";
+    log_message("Scanning filesystem for files not in download_stat...");
     
     // Get list of all files currently in download_stat
-    $stmt = $db->getConnection()->prepare('SELECT key_path FROM download_stat');
+    $stmt = $db->getConnection()->prepare('SELECT `key` FROM download_stat');
     $stmt->execute();
-    $existing_files = array_column($stmt->fetchAll(), 'key_path');
+    $existing_files = array_column($stmt->fetchAll(), 'key');
     $existing_files_set = array_flip($existing_files); // For faster lookup
     
     // Recursively scan BASE_PATH
@@ -288,7 +306,7 @@ try {
             }
             
             $scanned++;
-            echo "[" . date('Y-m-d H:i:s') . "] Found new file: " . $relativePath . "\n";
+            log_message("Found new file: " . $relativePath);
             
             try {
                 $file_size = $file->getSize();
@@ -315,49 +333,49 @@ try {
                 $download_count = $count_stmt->fetchColumn() ?: 0;
                 
                 $stmt = $db->getConnection()->prepare('
-                    INSERT INTO download_stat (key_path, count, md5, sha256, file_size)
+                    INSERT INTO download_stat (`key`, count, md5, sha256, file_size)
                     VALUES (?, ?, ?, ?, ?)
                 ');
                 $stmt->execute([$relativePath, $download_count, $md5, $sha256, $file_size]);
                 
-                echo "[" . date('Y-m-d H:i:s') . "] Added to database: " . $relativePath . " (downloads: $download_count)\n\n";
+                log_message("Added to database: " . $relativePath . " (downloads: $download_count)");
                 $added++;
             } catch (Exception $e) {
-                echo "[" . date('Y-m-d H:i:s') . "] ERROR: Failed to process " . $relativePath . ": " . $e->getMessage() . "\n";
+                log_message("ERROR: Failed to process " . $relativePath . ": " . $e->getMessage());
             }
         }
     }
     
-    echo "[" . date('Y-m-d H:i:s') . "] Filesystem scan completed: $scanned files scanned, $added files added\n";
-    echo "[" . date('Y-m-d H:i:s') . "] Hash validation completed: $calculated updated, $removed removed, $added newly added\n";
+    log_message("Filesystem scan completed: $scanned files scanned, $added files added");
+    log_message("Hash validation completed: $calculated updated, $removed removed, $added newly added");
     
 } catch (Exception $e) {
-    echo "[" . date('Y-m-d H:i:s') . "] ERROR: Hash validation failed: " . $e->getMessage() . "\n";
+    log_message("ERROR: Hash validation failed: " . $e->getMessage());
 }
 
 // 5. Health check
-echo "[" . date('Y-m-d H:i:s') . "] Performing health checks...\n";
+log_message("Performing health checks...");
 try {
     // Test R2 connectivity
     if (function_exists('generate_presigned_url')) {
         $test_url = generate_presigned_url('health-test.txt', 60);
         if ($test_url) {
-            echo "[" . date('Y-m-d H:i:s') . "] R2 connectivity: OK\n";
+            log_message("R2 connectivity: OK");
         } else {
-            echo "[" . date('Y-m-d H:i:s') . "] WARNING: R2 URL generation failed\n";
+            log_message("WARNING: R2 URL generation failed");
         }
     }
     
     // Test base path accessibility
     if (defined('BASE_PATH') && is_readable(BASE_PATH)) {
-        echo "[" . date('Y-m-d H:i:s') . "] Base path accessibility: OK\n";
+        log_message("Base path accessibility: OK");
     } else {
-        echo "[" . date('Y-m-d H:i:s') . "] ERROR: Base path not accessible\n";
+        log_message("ERROR: Base path not accessible");
     }
     
 } catch (Exception $e) {
-    echo "[" . date('Y-m-d H:i:s') . "] ERROR: Health check failed: " . $e->getMessage() . "\n";
+    log_message("ERROR: Health check failed: " . $e->getMessage());
 }
 
-echo "[" . date('Y-m-d H:i:s') . "] Cron job completed\n\n";
+log_message("Cron job completed");
 ?>

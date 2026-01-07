@@ -27,10 +27,34 @@ class FileHasher {
         $fileSize = filesize($fullPath);
         $modifiedTime = filemtime($fullPath);
         
-        // Calculate hashes directly (no caching)
-        $hashes = $this->calculateHashes($fullPath, $algorithms);
+        // For large files (>500MB), trigger background processing
+        $largeFileThreshold = 500 * 1024 * 1024; // 500MB
+        if ($fileSize > $largeFileThreshold) {
+            $this->triggerBackgroundHashCalculation($filePath);
+            return [
+                'md5' => null,
+                'sha1' => null,
+                'sha256' => null,
+                'status' => 'queued_for_background_processing'
+            ];
+        }
         
-        return $hashes;
+        // Disable execution time limit for hash calculation
+        $originalLimit = ini_get('max_execution_time');
+        if ($originalLimit > 0) {
+            set_time_limit(0);
+        }
+        
+        try {
+            // Calculate hashes directly
+            $hashes = $this->calculateHashes($fullPath, $algorithms);
+            return $hashes;
+        } finally {
+            // Restore original time limit if it was set
+            if ($originalLimit > 0) {
+                set_time_limit($originalLimit);
+            }
+        }
     }
     
     /**
@@ -51,21 +75,39 @@ class FileHasher {
             throw new Exception('Cannot open file for reading: ' . $filePath);
         }
         
-        while (!feof($handle)) {
-            $chunk = fread($handle, $this->chunkSize);
-            foreach ($contexts as $algo => $context) {
-                hash_update($context, $chunk);
+        try {
+            $bytesRead = 0;
+            $maxBytes = 20 * 1024 * 1024 * 1024; // 20GB safety limit
+            
+            while (!feof($handle) && $bytesRead < $maxBytes) {
+                $chunk = fread($handle, $this->chunkSize);
+                if ($chunk === false) {
+                    throw new Exception('Error reading file: ' . $filePath);
+                }
+                if (empty($chunk)) {
+                    break;
+                }
+                
+                $bytesRead += strlen($chunk);
+                foreach ($contexts as $algo => $context) {
+                    hash_update($context, $chunk);
+                }
             }
+            
+            fclose($handle);
+            
+            // Finalize hashes
+            foreach ($contexts as $algo => $context) {
+                $hashes[$algo] = hash_final($context);
+            }
+            
+            return $hashes;
+        } catch (Exception $e) {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+            throw $e;
         }
-        
-        fclose($handle);
-        
-        // Finalize hashes
-        foreach ($contexts as $algo => $context) {
-            $hashes[$algo] = hash_final($context);
-        }
-        
-        return $hashes;
     }
     
 

@@ -3,13 +3,11 @@
 $request_uri = $_SERVER['REQUEST_URI'];
 $path = parse_url($request_uri, PHP_URL_PATH);
 
-// Handle API routes
+// Handle API routes - route all API calls to api.php
 if (strpos($path, '/api/') === 0) {
-    $api_file = $_SERVER['DOCUMENT_ROOT'] . $path . '.php';
-    if (file_exists($api_file)) {
-        include_once $api_file;
-        return true;
-    }
+    $_SERVER['PATH_INFO'] = $path;
+    include_once 'api.php';
+    return true;
 }
 
 // If it's a real file (like CSS, JS, images), serve it normally

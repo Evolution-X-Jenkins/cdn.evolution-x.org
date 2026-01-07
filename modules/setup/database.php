@@ -144,13 +144,25 @@ class Database {
     
     public function updateDownloadStat($filePath, $fileSize = null) {
         // Use full path as key
-        $stmt = $this->pdo->prepare('
-            INSERT INTO download_stat (key_path, count, file_size) 
-            VALUES (?, 1, ?) 
-            ON CONFLICT(key_path) DO UPDATE SET 
-                count = count + 1,
-                file_size = COALESCE(?, file_size)
-        ');
+        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+            // MySQL syntax
+            $stmt = $this->pdo->prepare('
+                INSERT INTO download_stat (`key`, count, file_size) 
+                VALUES (?, 1, ?) 
+                ON DUPLICATE KEY UPDATE 
+                    count = count + 1,
+                    file_size = COALESCE(?, file_size)
+            ');
+        } else {
+            // SQLite syntax
+            $stmt = $this->pdo->prepare('
+                INSERT INTO download_stat (key_path, count, file_size) 
+                VALUES (?, 1, ?) 
+                ON CONFLICT(key_path) DO UPDATE SET 
+                    count = count + 1,
+                    file_size = COALESCE(?, file_size)
+            ');
+        }
         $stmt->execute([$filePath, $fileSize, $fileSize]);
     }
     
@@ -170,13 +182,20 @@ class Database {
                 // Prepare folder condition (empty string for root files)
                 $folderCondition = ($folder === '/') ? '' : trim($folder, '/');
                 
+                // Determine date filter based on database type
+                if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+                    $dateFilter = "download_time >= DATE_SUB(NOW(), INTERVAL " . intval($days) . " DAY)";
+                } else {
+                    $dateFilter = "download_time >= datetime('now', '-" . intval($days) . " days')";
+                }
+                
                 // Get total downloads in the period
                 $stmt = $this->pdo->prepare('
                     SELECT COUNT(*) as total_downloads
                     FROM download_stats 
                     WHERE filename = ? AND folder = ?
-                    AND download_time >= datetime("now", "-' . intval($days) . ' days")
-                ');
+                    AND ' . $dateFilter
+                );
                 $stmt->execute([$filename, $folderCondition]);
                 $total = $stmt->fetch();
                 
@@ -185,7 +204,7 @@ class Database {
                     SELECT DATE(download_time) as download_date, COUNT(*) as downloads
                     FROM download_stats 
                     WHERE filename = ? AND folder = ?
-                    AND download_time >= datetime("now", "-' . intval($days) . ' days")
+                    AND ' . $dateFilter . '
                     GROUP BY DATE(download_time)
                     ORDER BY download_date DESC
                 ');
@@ -198,6 +217,10 @@ class Database {
                 ];
             } else {
                 // Get all-time stats for specific file using both tables
+                // Need to rebuild the path from folder and filename to match download_stat.key
+                $pathParts = explode('/', trim($filePath, '/'));
+                $filename = end($pathParts);
+                
                 $stmt = $this->pdo->prepare('
                     SELECT ds.count as total_downloads,
                            ds.file_size,
@@ -207,16 +230,16 @@ class Database {
                            MAX(dst.download_time) as last_download,
                            COUNT(DISTINCT dst.ip_address) as unique_ips
                     FROM download_stat ds
-                    LEFT JOIN download_stats dst ON ds.key_path = ?
-                    WHERE ds.key_path = ?
+                    LEFT JOIN download_stats dst ON dst.filename = ?
+                    WHERE ds.`key` = ?
                 ');
-                $stmt->execute([$filePath, $filePath]);
+                $stmt->execute([$filename, $filePath]);
                 return $stmt->fetch();
             }
         } else {
             // Get all file stats from download_stat table
             $stmt = $this->pdo->prepare('
-                SELECT key_path as file_path, count as downloads, 
+                SELECT `key` as file_path, count as downloads, 
                        file_size, sha256, md5
                 FROM download_stat 
                 ORDER BY count DESC 

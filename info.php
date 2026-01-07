@@ -68,17 +68,15 @@ function show_info_page($relative_file_path, $full_file_path) {
         $stat_data = $stmt->fetch();
         
         if ($stat_data && !empty($stat_data['md5']) && !empty($stat_data['sha256'])) {
-            // We have hashes
+            // We have hashes cached in database
             $md5_hash = $stat_data['md5'];
             $sha256_hash = $stat_data['sha256'];
             $hashes = array_filter([
                 'md5' => $md5_hash,
                 'sha256' => $sha256_hash
             ]);
-        } else {
-            // No hashes available - will be calculated by cron job
-            $hashes_calculating = true;
         }
+        // If no hashes found, JavaScript will attempt to load from OTA
     } catch (Exception $e) {
         error_log('Failed to get file hashes: ' . $e->getMessage());
     }

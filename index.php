@@ -93,10 +93,23 @@ if ($is_download) {
     if (is_file($file_path)) {
         log_action('Download page accessed', $target_file);
         
+        // Check for user agents that should bypass countdown
+        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+        $bypassCountdown = false;
+        
+        // Allow specific user agents to bypass countdown
+        $allowedAgents = ['evoxupdater', 'wget', 'curl', 'aria2', 'php'];
+        $userAgentLower = strtolower($userAgent);
+        foreach ($allowedAgents as $agent) {
+            if (strpos($userAgentLower, $agent) !== false) {
+                $bypassCountdown = true;
+                break;
+            }
+        }
+        
         // Record download statistics
         $userId = get_user_id();
         $ipAddress = $_SERVER['REMOTE_ADDR'] ?? '';
-        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
         $referer = $_SERVER['HTTP_REFERER'] ?? '';
         $fileSize = filesize($file_path);
         
@@ -104,6 +117,13 @@ if ($is_download) {
             $db->recordDownload($target_file, $userId, $ipAddress, $userAgent, $referer, $fileSize);
         } catch (Exception $e) {
             error_log('Failed to record download: ' . $e->getMessage());
+        }
+        
+        // If bypass is enabled, redirect directly to download
+        if ($bypassCountdown) {
+            log_action('Direct download (user agent bypass)', $target_file);
+            header('Location: ' . $target_file . '/direct-download');
+            exit;
         }
         
         show_download_page($target_file, $file_path);

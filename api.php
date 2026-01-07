@@ -13,6 +13,7 @@ require_once __DIR__ . '/modules/api/health.php';
 require_once __DIR__ . '/modules/api/push.php';
 require_once __DIR__ . '/modules/api/daily_downloads.php';
 require_once __DIR__ . '/modules/api/hash_management.php';
+require_once __DIR__ . '/modules/api/store_hashes.php';
 
 // CORS headers
 function setCorsHeaders() {
@@ -115,6 +116,10 @@ function handleApiRequest() {
             $result = handleFileHashesApi($method, $pathParts);
             break;
             
+        case 'store-hashes':
+            $result = handleStoreHashesApi($method, $pathParts);
+            break;
+            
         case 'file-operations':
             $result = handleFileOperationsApi($method, $pathParts);
             break;
@@ -127,7 +132,7 @@ function handleApiRequest() {
             $result = [
                 'error' => 'Unknown API endpoint',
                 'endpoint' => $endpoint,
-                'available' => ['push', 'download-statistics', 'daily-downloads', 'daily-summary', 'file-hashes', 'file-operations', 'health']
+                'available' => ['push', 'download-statistics', 'daily-downloads', 'daily-summary', 'file-hashes', 'store-hashes', 'file-operations', 'health']
             ];
             jsonResponse($result, 404);
     }

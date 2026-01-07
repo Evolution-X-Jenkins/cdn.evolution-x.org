@@ -131,12 +131,21 @@ ob_start();
                     Hashes are being calculated in the background. Refresh the page in a few moments.
                 </div>
                 <?php else: ?>
-                <div class="text-gray-400 text-center py-4">
+                <div id="ota-hash-loading" class="text-blue-400 text-center py-4">
+                    <svg class="w-8 h-8 mx-auto mb-2 text-blue-500 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    Loading hashes from OTA server...
+                </div>
+                <div id="ota-hash-not-found" style="display:none;" class="text-gray-400 text-center py-4">
                     <svg class="w-8 h-8 mx-auto mb-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                     </svg>
-                    No hashes cached. Click "Calculate Hashes" to generate them.
+                    No hashes found in OTA database. Click "Calculate Hashes" to generate them.
                 </div>
+                <button onclick="calculateHashes()" id="calculate-hashes-btn" style="display:none;" class="px-3 py-1 bg-[#0060ff] text-white text-sm rounded hover:bg-[#004bb5] transition-colors">
+                    Calculate Hashes
+                </button>
                 <?php endif; ?>
             </div>
         </div>
@@ -170,6 +179,203 @@ function copyToClipboard(text) {
     });
 }
 
+/**
+ * Load hashes from OTA device.json on GitHub
+ * Parses file path to extract device name, then fetches from Evolution-X/OTA repository
+ * and matches filename to get md5 and sha256 hashes
+ */
+async function loadOTAHashes() {
+    try {
+        const filePath = '<?php echo addslashes($relative_file_path); ?>';
+        const fileName = '<?php echo addslashes($file_name); ?>';
+        
+        // Extract device name from path (e.g., /raphael/16/filename.zip -> raphael)
+        const pathParts = filePath.split('/').filter(p => p);
+        if (pathParts.length < 2) {
+            console.log('Invalid file path structure for OTA lookup');
+            showCalculateHashesButton();
+            return;
+        }
+        
+        const deviceName = pathParts[0];
+        console.log('Device name:', deviceName, 'File name:', fileName);
+        
+        // Fetch device.json from GitHub Evolution-X/OTA repository
+        // Try primary device branch first, then fallback to vic and udc branches
+        const branches = ['bka', 'vic', 'udc'];
+        const otaUrls = branches.map(branch => 
+            `https://raw.githubusercontent.com/Evolution-X/OTA/refs/heads/${branch}/builds/${deviceName}.json`
+        );
+        
+        let otaData = null;
+        for (const url of otaUrls) {
+            try {
+                console.log('Trying GitHub OTA URL:', url);
+                const response = await fetch(url, { 
+                    signal: AbortSignal.timeout(5000),
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                if (response.ok) {
+                    otaData = await response.json();
+                    console.log('Fetched OTA data from GitHub:', url);
+                    break;
+                }
+            } catch (error) {
+                console.log('GitHub OTA URL failed:', url, error.message);
+                continue;
+            }
+        }
+        
+        if (!otaData || !otaData.response || !Array.isArray(otaData.response)) {
+            console.log('Invalid OTA data structure or no data found');
+            showCalculateHashesButton();
+            return;
+        }
+        
+        console.log('OTA Response entries:', otaData.response.length);
+        console.log('Looking for file:', fileName);
+        otaData.response.forEach((entry, idx) => {
+            console.log(`Entry ${idx}: ${entry.filename}`);
+        });
+        
+        // Find matching file entry
+        // Try exact match first, then try without extension variations
+        let fileEntry = otaData.response.find(entry => entry.filename === fileName);
+        
+        if (!fileEntry) {
+            // Try without extension
+            const fileNameWithoutExt = fileName.replace(/\.(zip|img|bin)$/, '');
+            fileEntry = otaData.response.find(entry => 
+                entry.filename === fileNameWithoutExt ||
+                entry.filename === `${fileNameWithoutExt}.zip`
+            );
+        }
+        
+        if (!fileEntry) {
+            // Try partial match - look for entries that contain the device name and similar date pattern
+            const devicePattern = fileName.split('-')[0]; // e.g., "EvolutionX"
+            fileEntry = otaData.response.find(entry => 
+                entry.filename && entry.filename.includes(devicePattern) && 
+                entry.md5 && entry.sha256
+            );
+        }
+        
+        if (!fileEntry || !fileEntry.md5 || !fileEntry.sha256) {
+            console.log('File not found in OTA database or hashes missing');
+            showCalculateHashesButton();
+            return;
+        }
+        
+        // Display the hashes and store them
+        displayOTAHashes(fileEntry);
+        console.log('Successfully loaded hashes from GitHub OTA');
+        
+    } catch (error) {
+        console.error('Error loading OTA hashes:', error);
+        showCalculateHashesButton();
+    }
+}
+
+/**
+ * Display hashes loaded from OTA and store them in database
+ */
+function displayOTAHashes(fileEntry) {
+    const loadingDiv = document.getElementById('ota-hash-loading');
+    const notFoundDiv = document.getElementById('ota-hash-not-found');
+    const calculateBtn = document.getElementById('calculate-hashes-btn');
+    
+    if (loadingDiv) loadingDiv.style.display = 'none';
+    if (notFoundDiv) notFoundDiv.style.display = 'none';
+    if (calculateBtn) calculateBtn.style.display = 'none';
+    
+    // Create hash display HTML
+    const hashesContainer = document.querySelector('.space-y-4');
+    const hashesHtml = `
+        <div>
+            <div class="flex justify-between items-center mb-1">
+                <span class="text-sm font-medium text-gray-300">MD5</span>
+                <button onclick="copyToClipboard('${fileEntry.md5}')" class="text-xs text-[#0060ff] hover:text-blue-300">
+                    Copy
+                </button>
+            </div>
+            <div class="bg-gray-800 p-3 rounded font-mono text-sm text-gray-200 break-all">
+                ${fileEntry.md5}
+            </div>
+        </div>
+        <div>
+            <div class="flex justify-between items-center mb-1">
+                <span class="text-sm font-medium text-gray-300">SHA256</span>
+                <button onclick="copyToClipboard('${fileEntry.sha256}')" class="text-xs text-[#0060ff] hover:text-blue-300">
+                    Copy
+                </button>
+            </div>
+            <div class="bg-gray-800 p-3 rounded font-mono text-sm text-gray-200 break-all">
+                ${fileEntry.sha256}
+            </div>
+        </div>
+        <div class="text-xs text-gray-500 text-center mt-2">
+            Hashes from Evolution X OTA server
+        </div>
+    `;
+    
+    // Clear existing content and insert new hashes
+    if (hashesContainer) {
+        hashesContainer.innerHTML = hashesHtml;
+    }
+    
+    // Store hashes in database via API call
+    storeHashesInDatabase(fileEntry);
+}
+
+/**
+ * Store hashes retrieved from OTA in the database for caching
+ */
+function storeHashesInDatabase(fileEntry) {
+    try {
+        const filePath = '<?php echo addslashes($relative_file_path); ?>';
+        
+        // Send hashes to backend API to store in database
+        fetch('/api/store-hashes', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                file_path: filePath,
+                md5: fileEntry.md5,
+                sha256: fileEntry.sha256,
+                source: 'ota'
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                console.log('Hashes stored in database successfully');
+            } else {
+                console.log('Failed to store hashes in database:', data.message);
+            }
+        })
+        .catch(error => {
+            console.log('Error storing hashes in database:', error);
+        });
+    } catch (error) {
+        console.error('Error in storeHashesInDatabase:', error);
+    }
+}
+
+/**
+ * Show calculate hashes button when OTA lookup fails
+ */
+function showCalculateHashesButton() {
+    const loadingDiv = document.getElementById('ota-hash-loading');
+    const notFoundDiv = document.getElementById('ota-hash-not-found');
+    const calculateBtn = document.getElementById('calculate-hashes-btn');
+    
+    if (loadingDiv) loadingDiv.style.display = 'none';
+    if (notFoundDiv) notFoundDiv.style.display = 'block';
+    if (calculateBtn) calculateBtn.style.display = 'inline-block';
+}
+
 function calculateHashes() {
     const button = event.target;
     const originalText = button.textContent;
@@ -201,6 +407,17 @@ function calculateHashes() {
         button.disabled = false;
     });
 }
+
+// Load OTA hashes when page is fully loaded
+document.addEventListener('DOMContentLoaded', function() {
+    // Check if hashes are already cached (not in loading state)
+    const loadingDiv = document.getElementById('ota-hash-loading');
+    if (loadingDiv && loadingDiv.style.display !== 'none') {
+        // Hashes are not cached, attempt to load from OTA
+        console.log('No cached hashes found, attempting to load from OTA...');
+        loadOTAHashes();
+    }
+});
 </script>
 
 <?php
