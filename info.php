@@ -34,21 +34,50 @@ function show_info_page($relative_file_path, $full_file_path) {
     $total_downloads_stats = $db->getDownloadStats($relative_file_path); // All time
     $total_downloads = $total_downloads_stats['total_downloads'] ?? 0;
     
-    // Get 7-day breakdown for chart
-    $download_stats = $db->getDownloadStats($relative_file_path, 7); // 7 days
-    $daily_downloads = $download_stats['daily_downloads'] ?? [];
-    
-    // Create complete 7-day chart data (fill missing days with 0)
+    // Try to load 7-day breakdown from JSON cache file
     $chart_data = [];
-    for ($i = 6; $i >= 0; $i--) {
-        $date = date('Y-m-d', strtotime("-$i days"));
-        $chart_data[$date] = 0;
+    $daily_downloads = [];
+    $cache_file = __DIR__ . '/data/stats_cache/download_stats.json';
+    
+    if (file_exists($cache_file)) {
+        try {
+            $cache_data = json_decode(file_get_contents($cache_file), true);
+            if (isset($cache_data[$relative_file_path])) {
+                // Use cached daily breakdown
+                $daily_data = $cache_data[$relative_file_path];
+                foreach ($daily_data as $date => $count) {
+                    $chart_data[$date] = (int)$count;
+                }
+            }
+        } catch (Exception $e) {
+            // Cache file read failed, fall back to DB query
+        }
     }
     
-    // Fill in actual download data
-    foreach ($daily_downloads as $day) {
-        if (isset($chart_data[$day['download_date']])) {
-            $chart_data[$day['download_date']] = (int)$day['downloads'];
+    // If no cache, fall back to live query
+    if (empty($chart_data)) {
+        $download_stats = $db->getDownloadStats($relative_file_path, 7); // 7 days
+        $daily_downloads = $download_stats['daily_downloads'] ?? [];
+        
+        // Create complete 7-day chart data (fill missing days with 0)
+        for ($i = 6; $i >= 0; $i--) {
+            $date = date('Y-m-d', strtotime("-$i days"));
+            $chart_data[$date] = 0;
+        }
+        
+        // Fill in actual download data
+        foreach ($daily_downloads as $day) {
+            if (isset($chart_data[$day['download_date']])) {
+                $chart_data[$day['download_date']] = (int)$day['downloads'];
+            }
+        }
+    } else {
+        // Fill in missing dates in cache data
+        for ($i = 6; $i >= 0; $i--) {
+            $date = date('Y-m-d', strtotime("-$i days"));
+            if (!isset($chart_data[$date])) {
+                $chart_data[$date] = 0;
+            }
         }
     }
     

@@ -59,8 +59,21 @@ class Database {
     
     private function createTables() {
         if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
-            // For MySQL, skip table creation - tables should already exist in production
-            // The production database has the correct schema with `key` column
+            // For MySQL, create cache table if it doesn't exist
+            $sql = "
+                CREATE TABLE IF NOT EXISTS download_stats_cache (
+                    filename VARCHAR(255) PRIMARY KEY,
+                    downloads_7day INT DEFAULT 0,
+                    downloads_alltime INT DEFAULT 0,
+                    cached_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX idx_cached_at (cached_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            ";
+            try {
+                $this->pdo->exec($sql);
+            } catch (Exception $e) {
+                error_log("Cache table creation failed (may already exist): " . $e->getMessage());
+            }
             return;
         }
         
@@ -85,12 +98,21 @@ class Database {
                 md5 VARCHAR(32),
                 file_size INTEGER
             );
+            
+            -- Download statistics cache (pre-computed for fast page loads)
+            CREATE TABLE IF NOT EXISTS download_stats_cache (
+                filename VARCHAR(255) PRIMARY KEY,
+                downloads_7day INTEGER DEFAULT 0,
+                downloads_alltime INTEGER DEFAULT 0,
+                cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
 
             -- Create indexes for better performance
             CREATE INDEX IF NOT EXISTS idx_download_stats_filename ON download_stats(filename);
             CREATE INDEX IF NOT EXISTS idx_download_stats_folder ON download_stats(folder);
             CREATE INDEX IF NOT EXISTS idx_download_stats_time ON download_stats(download_time);
             CREATE INDEX IF NOT EXISTS idx_download_stat_key ON download_stat(key_path);
+            CREATE INDEX IF NOT EXISTS idx_cache_time ON download_stats_cache(cached_at);
         ";
         
         $this->pdo->exec($sql);
@@ -457,6 +479,38 @@ class Database {
         $stmt = $this->pdo->prepare('DELETE FROM upload_sessions WHERE expires_at < CURRENT_TIMESTAMP');
         $stmt->execute();
         return $stmt->rowCount();
+    }
+    
+    // Download stats cache methods
+    public function getDownloadStatsFromCache($filename) {
+        try {
+            $stmt = $this->pdo->prepare('
+                SELECT downloads_7day, downloads_alltime, cached_at
+                FROM download_stats_cache 
+                WHERE filename = ?
+                AND cached_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)
+            ');
+            $stmt->execute([$filename]);
+            return $stmt->fetch();
+        } catch (Exception $e) {
+            // Cache table may not exist yet, return null
+            return null;
+        }
+    }
+    
+    public function getCachedTopDownloads($limit = 20) {
+        try {
+            $stmt = $this->pdo->prepare('
+                SELECT filename, downloads_7day, downloads_alltime, cached_at
+                FROM download_stats_cache 
+                ORDER BY downloads_alltime DESC
+                LIMIT ?
+            ');
+            $stmt->execute([$limit]);
+            return $stmt->fetchAll();
+        } catch (Exception $e) {
+            return [];
+        }
     }
 }
 ?>

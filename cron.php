@@ -15,10 +15,15 @@ if (isset($_SERVER['HTTP_HOST'])) {
 require_once __DIR__ . '/modules/core/bucket_cache.php';
 require_once __DIR__ . '/modules/setup/database.php';
 
-// Setup logging
+// Setup logging and cache directory
 $logsDir = __DIR__ . '/logs';
 if (!is_dir($logsDir)) {
     mkdir($logsDir, 0755, true);
+}
+
+$statsDir = __DIR__ . '/data/stats_cache';
+if (!is_dir($statsDir)) {
+    mkdir($statsDir, 0755, true);
 }
 
 $logFile = $logsDir . '/cron_' . date('Y-m-d') . '.log';
@@ -81,276 +86,114 @@ try {
     log_message("WARNING: Database cleanup had issues: " . $e->getMessage());
 }
 
-// 3. Process hash calculation queue
-log_message("Processing hash calculation queue...");
+// 3. Build 7-day download stats cache as JSON file
+log_message("Building 7-day download stats cache...");
 try {
-    $hash_queue_file = sys_get_temp_dir() . '/filebrowser_hash_queue.txt';
-    
-    if (file_exists($hash_queue_file)) {
-        $queue = file($hash_queue_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        if (!empty($queue)) {
-            require_once __DIR__ . '/modules/core/file_operations.php';
-            $hasher = new FileHasher();
-            
-            // Process up to 3 files per cron run to avoid timeouts
-            $processed = 0;
-            $remaining_queue = [];
-            
-            foreach ($queue as $filePath) {
-                if ($processed < 3) {
-                    try {
-                        $fullPath = BASE_PATH . '/' . ltrim($filePath, '/');
-                        if (file_exists($fullPath)) {
-                            log_message("Calculating hashes for: $filePath");
-                            $hashes = $hasher->getFileHashes($filePath, ['md5', 'sha256']);
-                            log_message("Hash calculation completed for: $filePath");
-                            $processed++;
-                        }
-                    } catch (Exception $e) {
-                        log_message("ERROR: Hash calculation failed for $filePath: " . $e->getMessage());
-                        $processed++; // Count as processed to avoid infinite retries
-                    }
-                } else {
-                    $remaining_queue[] = $filePath;
-                }
-            }
-            
-            // Write back remaining queue
-            if (!empty($remaining_queue)) {
-                file_put_contents($hash_queue_file, implode("\n", $remaining_queue) . "\n", LOCK_EX);
-                log_message(count($remaining_queue) . " files remaining in hash queue");
-            } else {
-                unlink($hash_queue_file);
-                log_message("Hash queue cleared");
-            }
-        } else {
-            unlink($hash_queue_file);
-        }
-    } else {
-        log_message("No hash calculations pending");
-    }
-} catch (Exception $e) {
-    log_message("ERROR: Hash queue processing failed: " . $e->getMessage());
-}
-
-// 4. Validate and update hashes from download_stat table
-log_message("Processing files from download statistics...");
-try {
-    require_once __DIR__ . '/modules/core/file_operations.php';
-    $hasher = new FileHasher();
     $db = Database::getInstance();
     
-    // Get ALL files from download_stat table to check file sizes and hashes
-    // Note: column is 'key', not 'key_path'
-    $stmt = $db->getConnection()->prepare('
-        SELECT id, `key`, file_size, md5, sha256, count
-        FROM download_stat 
-        ORDER BY count DESC
-    ');
-    $stmt->execute();
-    $files = $stmt->fetchAll();
-    
-    $processed = 0;
-    $removed = 0;
-    $calculated = 0;
-    $updated = 0;
-    
-    foreach ($files as $file) {
-        $key_path = $file['key'];
-        $fullPath = BASE_PATH . '/' . ltrim($key_path, '/');
-        
-        // Check if file still exists
-        if (!file_exists($fullPath)) {
-            log_message("File not found, skipping: " . $key_path);
-            $removed++;
-            continue;
-        }
-        
-        // Get current file size to check for changes (detect mid-upload)
-        $currentSize = filesize($fullPath);
-        
-        // Check if file size doesn't match OR if hashes are missing/empty
-        $needs_update = false;
-        $reason = "";
-        
-        if ($file['file_size'] && $currentSize != $file['file_size']) {
-            $needs_update = true;
-            $reason = "File size mismatch (DB: {$file['file_size']}, current: {$currentSize})";
-        } else if (empty($file['md5']) || empty($file['sha256']) || $file['md5'] === '' || $file['sha256'] === '') {
-            $needs_update = true;
-            $reason = "Missing hashes";
-        } else if (!$file['file_size']) {
-            $needs_update = true;
-            $reason = "Missing file size";
-        }
-        
-        if ($needs_update) {
-            log_message("$reason, updating: " . $key_path);
-            
-            try {
-                // Show progress bar before calculation
-                echo "MD5 ";
-                for ($i = 0; $i < 20; $i++) { echo "."; usleep(10000); }
-                echo " ";
-                
-                $md5 = hash_file('md5', $fullPath);
-                
-                for ($i = 0; $i < 10; $i++) { echo "|"; usleep(5000); }
-                echo " Complete\n";
-                
-                // Show progress bar for SHA256
-                echo "SHA256 ";
-                for ($i = 0; $i < 20; $i++) { echo "."; usleep(10000); }
-                echo " ";
-                
-                $sha256 = hash_file('sha256', $fullPath);
-                
-                for ($i = 0; $i < 10; $i++) { echo "|"; usleep(5000); }
-                echo " Complete\n";
-                
-                $stmt = $db->getConnection()->prepare('
-                    UPDATE download_stat 
-                    SET md5 = ?, sha256 = ?, file_size = ?
-                    WHERE id = ?
-                ');
-                $stmt->execute([$md5, $sha256, $currentSize, $file['id']]);
-                
-                log_message("Updated: " . $key_path);
-                $calculated++;
-            } catch (Exception $e) {
-                log_message("ERROR: Failed to update " . $key_path . ": " . $e->getMessage());
-            }
-        }
-        
-        $processed++;
-    }
-    
-    // Also check for new files that have been downloaded but not yet in download_stat
-    log_message("Checking for new downloaded files...");
+    // Get top downloaded files (last 7 days)
     $stmt = $db->getConnection()->prepare('
         SELECT DISTINCT filename 
         FROM download_stats 
-        WHERE filename NOT IN (SELECT `key` FROM download_stat)
+        ORDER BY download_time DESC 
+        LIMIT 50
     ');
     $stmt->execute();
-    $new_files = $stmt->fetchAll();
+    $popular_files = array_column($stmt->fetchAll(), 'filename');
     
-    foreach ($new_files as $new_file) {
-        $filename = $new_file['filename'];
-        $fullPath = BASE_PATH . '/' . ltrim($filename, '/');
-        
-        if (file_exists($fullPath)) {
-            log_message("Adding new file to download_stat: " . $filename);
-            try {
-                $file_size = filesize($fullPath);
-                
-                echo "MD5 ";
-                for ($i = 0; $i < 20; $i++) { echo "."; usleep(10000); }
-                echo " ";
-                $md5 = hash_file('md5', $fullPath);
-                for ($i = 0; $i < 10; $i++) { echo "|"; usleep(5000); }
-                echo " Complete\n";
-                
-                echo "SHA256 ";
-                for ($i = 0; $i < 20; $i++) { echo "."; usleep(10000); }
-                echo " ";
-                $sha256 = hash_file('sha256', $fullPath);
-                for ($i = 0; $i < 10; $i++) { echo "|"; usleep(5000); }
-                echo " Complete\n";
-                
-                // Get download count
-                $count_stmt = $db->getConnection()->prepare('
-                    SELECT COUNT(*) as downloads FROM download_stats WHERE filename = ?
-                ');
-                $count_stmt->execute([$filename]);
-                $download_count = $count_stmt->fetchColumn();
-                
-                $stmt = $db->getConnection()->prepare('
-                    INSERT INTO download_stat (`key`, count, md5, sha256, file_size)
-                    VALUES (?, ?, ?, ?, ?)
-                ');
-                $stmt->execute([$filename, $download_count, $md5, $sha256, $file_size]);
-                
-                log_message("Added new file: " . $filename . " (downloads: $download_count)");
-                $calculated++;
-            } catch (Exception $e) {
-                log_message("ERROR: Failed to add new file " . $filename . ": " . $e->getMessage());
+    $stats_cache = [];
+    $cached_count = 0;
+    
+    foreach ($popular_files as $filename) {
+        try {
+            // Get daily breakdown for the last 7 days
+            if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+                $dateFormat = "DATE_FORMAT(download_time, '%Y-%m-%d')";
+            } else {
+                $dateFormat = "DATE(download_time)";
             }
+            
+            $stmt = $db->getConnection()->prepare('
+                SELECT ' . $dateFormat . ' as download_date, COUNT(*) as downloads
+                FROM download_stats 
+                WHERE filename = ? 
+                AND download_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                GROUP BY ' . $dateFormat . '
+                ORDER BY download_date DESC
+            ');
+            $stmt->execute([$filename]);
+            $daily_stats = $stmt->fetchAll();
+            
+            // Build daily breakdown (newest first)
+            $daily_breakdown = [];
+            foreach ($daily_stats as $day) {
+                $daily_breakdown[$day['download_date']] = (int)$day['downloads'];
+            }
+            
+            if (!empty($daily_breakdown)) {
+                $stats_cache[$filename] = $daily_breakdown;
+                $cached_count++;
+            }
+        } catch (Exception $e) {
+            log_message("WARNING: Failed to cache stats for $filename: " . $e->getMessage());
         }
     }
     
-    // Now scan the entire filesystem to find files not in download_stat
-    log_message("Scanning filesystem for files not in download_stat...");
+    // Write to JSON file atomically
+    $cache_file = $statsDir . '/download_stats.json';
+    $temp_file = $cache_file . '.tmp';
     
-    // Get list of all files currently in download_stat
-    $stmt = $db->getConnection()->prepare('SELECT `key` FROM download_stat');
-    $stmt->execute();
-    $existing_files = array_column($stmt->fetchAll(), 'key');
-    $existing_files_set = array_flip($existing_files); // For faster lookup
-    
-    // Recursively scan BASE_PATH
-    $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator(BASE_PATH, RecursiveDirectoryIterator::SKIP_DOTS)
-    );
-    
-    $scanned = 0;
-    $added = 0;
-    
-    foreach ($iterator as $file) {
-        if ($file->isFile()) {
-            $relativePath = str_replace(BASE_PATH . '/', '', $file->getPathname());
-            
-            // Skip if already exists in download_stat
-            if (isset($existing_files_set[$relativePath])) {
-                continue;
-            }
-            
-            $scanned++;
-            log_message("Found new file: " . $relativePath);
-            
-            try {
-                $file_size = $file->getSize();
-                
-                echo "MD5 ";
-                for ($i = 0; $i < 20; $i++) { echo "."; usleep(10000); }
-                echo " ";
-                $md5 = hash_file('md5', $file->getPathname());
-                for ($i = 0; $i < 10; $i++) { echo "|"; usleep(5000); }
-                echo " Complete\n";
-                
-                echo "SHA256 ";
-                for ($i = 0; $i < 20; $i++) { echo "."; usleep(10000); }
-                echo " ";
-                $sha256 = hash_file('sha256', $file->getPathname());
-                for ($i = 0; $i < 10; $i++) { echo "|"; usleep(5000); }
-                echo " Complete\n";
-                
-                // Get download count if any
-                $count_stmt = $db->getConnection()->prepare('
-                    SELECT COUNT(*) as downloads FROM download_stats WHERE filename = ?
-                ');
-                $count_stmt->execute([$relativePath]);
-                $download_count = $count_stmt->fetchColumn() ?: 0;
-                
-                $stmt = $db->getConnection()->prepare('
-                    INSERT INTO download_stat (`key`, count, md5, sha256, file_size)
-                    VALUES (?, ?, ?, ?, ?)
-                ');
-                $stmt->execute([$relativePath, $download_count, $md5, $sha256, $file_size]);
-                
-                log_message("Added to database: " . $relativePath . " (downloads: $download_count)");
-                $added++;
-            } catch (Exception $e) {
-                log_message("ERROR: Failed to process " . $relativePath . ": " . $e->getMessage());
-            }
+    if (file_put_contents($temp_file, json_encode($stats_cache, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX)) {
+        rename($temp_file, $cache_file);
+        log_message("Cached 7-day stats for $cached_count files to JSON");
+    } else {
+        log_message("ERROR: Failed to write stats cache file");
+        if (file_exists($temp_file)) {
+            unlink($temp_file);
         }
     }
-    
-    log_message("Filesystem scan completed: $scanned files scanned, $added files added");
-    log_message("Hash validation completed: $calculated updated, $removed removed, $added newly added");
-    
 } catch (Exception $e) {
-    log_message("ERROR: Hash validation failed: " . $e->getMessage());
+    log_message("WARNING: Download stats caching failed: " . $e->getMessage());
+}
+
+// 4. Clean up old JSON cache files and stale database entries
+log_message("Cleaning cache...");
+try {
+    // Clean old JSON cache files (keep last 7 days worth of updates)
+    $cache_file = $statsDir . '/download_stats.json';
+    if (file_exists($cache_file)) {
+        $file_age = time() - filemtime($cache_file);
+        if ($file_age > 604800) { // 7 days in seconds
+            unlink($cache_file);
+            log_message("Removed stale JSON cache file");
+        }
+    }
+    
+    // Also clean temporary files
+    foreach (glob($statsDir . '/*.tmp') as $tmp_file) {
+        if (file_exists($tmp_file) && (time() - filemtime($tmp_file)) > 3600) {
+            unlink($tmp_file);
+        }
+    }
+    
+    $db = Database::getInstance();
+    
+    // Clean old database cache entries if using DB caching
+    try {
+        $stmt = $db->getConnection()->prepare('
+            DELETE FROM download_stats_cache 
+            WHERE cached_at < DATE_SUB(NOW(), INTERVAL 7 DAY)
+        ');
+        $stmt->execute();
+        $deleted = $stmt->rowCount();
+        if ($deleted > 0) {
+            log_message("Cleaned $deleted old cache entries from database");
+        }
+    } catch (Exception $e) {
+        // Cache table may not exist, that's fine
+    }
+} catch (Exception $e) {
+    log_message("WARNING: Cache cleanup had issues: " . $e->getMessage());
 }
 
 // 5. Health check
