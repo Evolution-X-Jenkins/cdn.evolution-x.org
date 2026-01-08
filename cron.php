@@ -156,6 +156,71 @@ try {
     log_message("WARNING: Download stats caching failed: " . $e->getMessage());
 }
 
+// 3.5 Verify all file total downloads
+log_message("Verifying file download totals...");
+try {
+    $db = Database::getInstance();
+    
+    // Get all files from download_stat
+    $stmt = $db->getConnection()->prepare('SELECT * FROM download_stat');
+    $stmt->execute();
+    $files = $stmt->fetchAll();
+    
+    $verified_count = 0;
+    $corrected_count = 0;
+    $errors = [];
+    
+    // Determine correct column name for this database type
+    $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
+    
+    foreach ($files as $file) {
+        try {
+            $fileKey = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? $file['key'] : $file['key_path'];
+            
+            // Count actual downloads from download_stats
+            $countStmt = $db->getConnection()->prepare('
+                SELECT COUNT(*) as total 
+                FROM download_stats 
+                WHERE filename = ?
+            ');
+            $countStmt->execute([$fileKey]);
+            $result = $countStmt->fetch();
+            $actual_count = (int)$result['total'];
+            
+            // Compare with stored count
+            $stored_count = (int)$file['count'];
+            
+            if ($actual_count !== $stored_count) {
+                $errors[] = "Mismatch for '{$fileKey}': stored={$stored_count}, actual={$actual_count}";
+                
+                // Update the stored count to match actual
+                $updateStmt = $db->getConnection()->prepare('
+                    UPDATE download_stat 
+                    SET count = ? 
+                    WHERE ' . $keyColumn . ' = ?
+                ');
+                $updateStmt->execute([$actual_count, $fileKey]);
+                $corrected_count++;
+                
+                log_message("Corrected download count for '{$fileKey}': {$stored_count} → {$actual_count}");
+            }
+            
+            $verified_count++;
+        } catch (Exception $e) {
+            log_message("WARNING: Failed to verify {$fileKey}: " . $e->getMessage());
+        }
+    }
+    
+    log_message("Verified $verified_count files, corrected $corrected_count mismatches");
+    
+    if (!empty($errors)) {
+        log_message("Download total mismatches found: " . implode("; ", array_slice($errors, 0, 5)) . (count($errors) > 5 ? "..." : ""));
+    }
+    
+} catch (Exception $e) {
+    log_message("WARNING: Download total verification failed: " . $e->getMessage());
+}
+
 // 4. Clean up old JSON cache files and stale database entries
 log_message("Cleaning cache...");
 try {

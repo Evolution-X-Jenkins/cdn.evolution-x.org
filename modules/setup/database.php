@@ -238,25 +238,35 @@ class Database {
                     'daily_downloads' => $daily
                 ];
             } else {
-                // Get all-time stats for specific file using both tables
-                // Need to rebuild the path from folder and filename to match download_stat.key
-                $pathParts = explode('/', trim($filePath, '/'));
-                $filename = end($pathParts);
+                // Get all-time stats for specific file
+                // Use download_stat table which has the accurate count
+                $filePath_lookup = ltrim($filePath, '/');
+                
+                // Determine which column name to use based on DB type
+                $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
                 
                 $stmt = $this->pdo->prepare('
-                    SELECT ds.count as total_downloads,
-                           ds.file_size,
-                           ds.sha256,
-                           ds.md5,
-                           MIN(dst.download_time) as first_download,
-                           MAX(dst.download_time) as last_download,
-                           COUNT(DISTINCT dst.ip_address) as unique_ips
-                    FROM download_stat ds
-                    LEFT JOIN download_stats dst ON dst.filename = ?
-                    WHERE ds.`key` = ?
+                    SELECT count as total_downloads,
+                           file_size,
+                           sha256,
+                           md5
+                    FROM download_stat
+                    WHERE ' . $keyColumn . ' = ?
                 ');
-                $stmt->execute([$filename, $filePath]);
-                return $stmt->fetch();
+                $stmt->execute([$filePath_lookup]);
+                $result = $stmt->fetch();
+                
+                // If no download_stat entry, return zeros
+                if (!$result) {
+                    return [
+                        'total_downloads' => 0,
+                        'file_size' => null,
+                        'sha256' => null,
+                        'md5' => null
+                    ];
+                }
+                
+                return $result;
             }
         } else {
             // Get all file stats from download_stat table

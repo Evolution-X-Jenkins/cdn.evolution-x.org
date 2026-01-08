@@ -69,25 +69,37 @@ function handleStoreHashesApi($method, $pathParts) {
         $log("Full path: $fullPath, exists: " . (file_exists($fullPath) ? 'yes' : 'no'));
         $fileSize = file_exists($fullPath) ? filesize($fullPath) : null;
         
-        // Get current count if record exists
-        $countStmt = $pdo->prepare('SELECT count FROM download_stat WHERE `key` = ?');
+        // Get current count if record exists (preserve download count)
+        $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
+        $countStmt = $pdo->prepare('SELECT count FROM download_stat WHERE ' . $keyColumn . ' = ?');
         $countStmt->execute([$normalizedPath]);
         $result = $countStmt->fetchColumn();
         $currentCount = ($result !== false && $result !== null) ? (int)$result : 0;
         $log("Current count from DB: $currentCount");
         
-        // Use INSERT...ON DUPLICATE KEY UPDATE for key-based primary key
-        $sql = '
-            INSERT INTO download_stat (`key`, count, md5, sha256, file_size, last_updated)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON DUPLICATE KEY UPDATE 
-                md5 = VALUES(md5),
-                sha256 = VALUES(sha256),
-                file_size = VALUES(file_size),
-                last_updated = CURRENT_TIMESTAMP
-        ';
+        // Use appropriate SQL syntax based on database type
+        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+            $sql = '
+                INSERT INTO download_stat (`key`, count, md5, sha256, file_size)
+                VALUES (?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE 
+                    md5 = VALUES(md5),
+                    sha256 = VALUES(sha256),
+                    file_size = VALUES(file_size)
+            ';
+        } else {
+            // SQLite
+            $sql = '
+                INSERT INTO download_stat (key_path, count, md5, sha256, file_size)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(key_path) DO UPDATE SET 
+                    md5 = excluded.md5,
+                    sha256 = excluded.sha256,
+                    file_size = excluded.file_size
+            ';
+        }
         
-        $log("Executing SQL: INSERT with key=$normalizedPath, count=$currentCount, md5=$md5, sha256=$sha256, filesize=$fileSize");
+        $log("Executing SQL: INSERT with path=$normalizedPath, count=$currentCount, md5=$md5, sha256=$sha256, filesize=$fileSize");
         
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$normalizedPath, $currentCount, $md5, $sha256, $fileSize]);
