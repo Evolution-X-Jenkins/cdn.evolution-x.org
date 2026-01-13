@@ -122,7 +122,7 @@ if ($is_download) {
         // If bypass is enabled, redirect directly to download
         if ($bypassCountdown) {
             log_action('Direct download (user agent bypass)', $target_file);
-            header('Location: ' . $target_file . '/direct-download');
+            header('Location: /' . $target_file . '/direct-download');
             exit;
         }
         

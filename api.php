@@ -14,6 +14,7 @@ require_once __DIR__ . '/modules/api/push.php';
 require_once __DIR__ . '/modules/api/daily_downloads.php';
 require_once __DIR__ . '/modules/api/hash_management.php';
 require_once __DIR__ . '/modules/api/store_hashes.php';
+require_once __DIR__ . '/api/fetch-ota-hashes.php';
 
 // CORS headers
 function setCorsHeaders() {
@@ -69,6 +70,9 @@ function handleApiRequest() {
     
     $pathParts = array_filter(explode('/', $path));
     $endpoint = array_shift($pathParts);
+    
+    // Normalize endpoint to lowercase for case-insensitive matching
+    $endpoint = strtolower($endpoint);
     
     $result = null;
     
@@ -128,11 +132,15 @@ function handleApiRequest() {
             $result = handleHealthApi($method, $pathParts);
             break;
             
+        case 'fetch-ota-hashes':
+            handleFetchOTAHashes();
+            return; // This function handles its own response
+            
         default:
             $result = [
                 'error' => 'Unknown API endpoint',
                 'endpoint' => $endpoint,
-                'available' => ['push', 'download-statistics', 'daily-downloads', 'daily-summary', 'file-hashes', 'store-hashes', 'file-operations', 'health']
+                'available' => ['push', 'download-statistics', 'daily-downloads', 'daily-summary', 'file-hashes', 'store-hashes', 'file-operations', 'health', 'fetch-ota-hashes']
             ];
             jsonResponse($result, 404);
     }

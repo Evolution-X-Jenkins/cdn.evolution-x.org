@@ -14,6 +14,7 @@ if (isset($_SERVER['HTTP_HOST'])) {
 
 require_once __DIR__ . '/modules/core/bucket_cache.php';
 require_once __DIR__ . '/modules/setup/database.php';
+require_once __DIR__ . '/modules/core/cache.php';
 
 // Setup logging and cache directory
 $logsDir = __DIR__ . '/logs';
@@ -76,35 +77,32 @@ try {
         log_message("cache_entries table does not exist, skipping cleanup");
     }
     
-    // Clean old upload sessions if method exists
-    if (method_exists($db, 'cleanupExpiredUploadSessions')) {
-        $db->cleanupExpiredUploadSessions();
-        log_message("Expired upload sessions cleaned");
-    }
-    
 } catch (Exception $e) {
     log_message("WARNING: Database cleanup had issues: " . $e->getMessage());
 }
 
-// 3. Build 7-day download stats cache as JSON file
-log_message("Building 7-day download stats cache...");
+// 3. Build 7-day download stats cache for ALL files (Redis + File + JSON)
+log_message("Building 7-day download stats cache for all files...");
 try {
     $db = Database::getInstance();
+    $cache = CacheManager::getInstance();
     
-    // Get top downloaded files (last 7 days)
+    // Get ALL files with downloads (not just top 50)
     $stmt = $db->getConnection()->prepare('
         SELECT DISTINCT filename 
         FROM download_stats 
-        ORDER BY download_time DESC 
-        LIMIT 50
+        ORDER BY filename ASC
     ');
     $stmt->execute();
-    $popular_files = array_column($stmt->fetchAll(), 'filename');
+    $all_files = array_column($stmt->fetchAll(), 'filename');
     
-    $stats_cache = [];
+    $stats_cache = []; // For JSON file
     $cached_count = 0;
+    $total_files = count($all_files);
     
-    foreach ($popular_files as $filename) {
+    log_message("Processing $total_files files with download history...");
+    
+    foreach ($all_files as $filename) {
         try {
             // Get daily breakdown for the last 7 days
             if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
@@ -132,6 +130,11 @@ try {
             
             if (!empty($daily_breakdown)) {
                 $stats_cache[$filename] = $daily_breakdown;
+                
+                // Cache to Redis + File via CacheManager (no TTL)
+                $cache_key = 'stats:' . $filename;
+                $cache->set($cache_key, $daily_breakdown);
+                
                 $cached_count++;
             }
         } catch (Exception $e) {
@@ -139,15 +142,15 @@ try {
         }
     }
     
-    // Write to JSON file atomically
+    // Write to JSON file atomically (for backward compatibility and persistence)
     $cache_file = $statsDir . '/download_stats.json';
     $temp_file = $cache_file . '.tmp';
     
     if (file_put_contents($temp_file, json_encode($stats_cache, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX)) {
         rename($temp_file, $cache_file);
-        log_message("Cached 7-day stats for $cached_count files to JSON");
+        log_message("Cached 7-day stats for $cached_count files to Redis, File, and JSON");
     } else {
-        log_message("ERROR: Failed to write stats cache file");
+        log_message("ERROR: Failed to write stats cache JSON file (but Redis+File cache was updated)");
         if (file_exists($temp_file)) {
             unlink($temp_file);
         }
@@ -177,13 +180,18 @@ try {
         try {
             $fileKey = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? $file['key'] : $file['key_path'];
             
-            // Count actual downloads from download_stats
+            // Parse the full path to extract filename and folder
+            $pathParts = explode('/', trim($fileKey, '/'));
+            $filename = end($pathParts);
+            $folder = count($pathParts) > 1 ? implode('/', array_slice($pathParts, 0, -1)) : '';
+            
+            // Count actual downloads from download_stats (matches on both filename AND folder)
             $countStmt = $db->getConnection()->prepare('
                 SELECT COUNT(*) as total 
                 FROM download_stats 
-                WHERE filename = ?
+                WHERE filename = ? AND folder = ?
             ');
-            $countStmt->execute([$fileKey]);
+            $countStmt->execute([$filename, $folder]);
             $result = $countStmt->fetch();
             $actual_count = (int)$result['total'];
             

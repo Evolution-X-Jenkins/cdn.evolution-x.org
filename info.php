@@ -7,6 +7,7 @@
 require_once 'modules/setup/config.php';
 require_once 'modules/setup/database.php';
 require_once 'modules/core/file_operations.php';
+require_once 'modules/core/cache.php';
 
 function show_info_page($relative_file_path, $full_file_path) {
     $db = Database::getInstance();
@@ -34,28 +35,22 @@ function show_info_page($relative_file_path, $full_file_path) {
     $total_downloads_stats = $db->getDownloadStats($relative_file_path); // All time
     $total_downloads = $total_downloads_stats['total_downloads'] ?? 0;
     
-    // Try to load 7-day breakdown from JSON cache file
+    // Try to load 7-day breakdown from cache (Redis → File → DB query)
     $chart_data = [];
     $daily_downloads = [];
-    $cache_file = __DIR__ . '/data/stats_cache/download_stats.json';
+    $cache = CacheManager::getInstance();
+    $cache_key = 'stats:' . basename($relative_file_path);
     
-    if (file_exists($cache_file)) {
-        try {
-            $cache_data = json_decode(file_get_contents($cache_file), true);
-            if (isset($cache_data[$relative_file_path])) {
-                // Use cached daily breakdown
-                $daily_data = $cache_data[$relative_file_path];
-                foreach ($daily_data as $date => $count) {
-                    $chart_data[$date] = (int)$count;
-                }
-            }
-        } catch (Exception $e) {
-            // Cache file read failed, fall back to DB query
+    // Try cache first
+    $cached_data = $cache->get($cache_key);
+    
+    if ($cached_data) {
+        // Use cached daily breakdown
+        foreach ($cached_data as $date => $count) {
+            $chart_data[$date] = (int)$count;
         }
-    }
-    
-    // If no cache, fall back to live query
-    if (empty($chart_data)) {
+    } else {
+        // Fall back to live database query
         $download_stats = $db->getDownloadStats($relative_file_path, 7); // 7 days
         $daily_downloads = $download_stats['daily_downloads'] ?? [];
         
@@ -71,8 +66,16 @@ function show_info_page($relative_file_path, $full_file_path) {
                 $chart_data[$day['download_date']] = (int)$day['downloads'];
             }
         }
+    }
+    
+    // Ensure we have all 7 days even if cache was partial
+    if (empty($chart_data)) {
+        for ($i = 6; $i >= 0; $i--) {
+            $date = date('Y-m-d', strtotime("-$i days"));
+            $chart_data[$date] = 0;
+        }
     } else {
-        // Fill in missing dates in cache data
+        // Fill in missing dates
         for ($i = 6; $i >= 0; $i--) {
             $date = date('Y-m-d', strtotime("-$i days"));
             if (!isset($chart_data[$date])) {
