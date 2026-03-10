@@ -36,3 +36,7 @@ modules/setup/config.php
 
 # Composer executable
 composer.phar
+
+# Temp data directory
+data
+data/*
