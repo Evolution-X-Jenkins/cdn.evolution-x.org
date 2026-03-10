@@ -318,11 +318,13 @@ API Request → Queue → Background Worker → Callback
    ↓
 8. Copy files from pre-release to production
    ↓
-9. Update status to 'completed' with success flag
+9. Update status to 'completed' or 'failed'
    ↓
 10. Send callback to Jenkins (if configured)
    ↓
-11. Log results
+11. Send Discord failure webhook (if configured and job failed)
+   ↓
+12. Log results
 ```
 
 ---
@@ -585,6 +587,7 @@ Format: `T-XXXX`
 │  (Immediate) │    │  - queued        │    │ (Every 1min) │
 └──────────────┘    │  - processing    │    └──────────────┘
                     │  - completed     │
+                    │  - failed        │
                     └──────────────────┘
                             │
                             ▼
@@ -597,8 +600,8 @@ Format: `T-XXXX`
 ### State Machine
 
 ```
-[queued] ──┬──> [processing] ──┬──> [completed] (success=true)
-           │                   └──> [completed] (success=false)
+[queued] ──┬──> [processing] ──┬──> [completed]
+           │                   └──> [failed]
            │
            └──> [queued] (if worker crashes, re-queued)
 ```
@@ -621,19 +624,25 @@ function processNextQueuedPushReleaseJob() {
         // 3. Perform file copy operation
         $result = copyFilesFromPreReleaseToProduction($job);
         
-        // 4. Update status to 'completed' with success flag
-        updateJobStatus($job->id, 'completed', $result['success']);
+      // 4. Update status to 'completed' or 'failed'
+      updateJobStatus($job->id, $result['success'] ? 'completed' : 'failed', $result['success']);
         
-        // 5. Send callback if configured
+      // 5. Send callback if configured
         if ($job->callback_enabled) {
             sendCallbackToJenkins($job, $result);
         }
+
+      // 6. Send Discord webhook on failure if configured
+      if (!$result['success']) {
+         sendDiscordFailureWebhook($job, $result);
+      }
         
         return ['status' => 'processed', 'jobId' => $job->id];
         
     } catch (Exception $e) {
-        // Mark as failed
-        updateJobStatus($job->id, 'completed', false, $e->getMessage());
+      // Mark as failed and notify
+      updateJobStatus($job->id, 'failed', false, $e->getMessage());
+      sendDiscordFailureWebhook($job, ['success' => false, 'error' => $e->getMessage()]);
         return ['status' => 'error', 'message' => $e->getMessage()];
     }
 }

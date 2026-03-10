@@ -197,7 +197,8 @@ function check_push_queue_status() {
         $counts = [
             'queued' => 0,
             'processing' => 0,
-            'completed' => 0
+            'completed' => 0,
+            'failed' => 0
         ];
         
         foreach ($stmt->fetchAll() as $row) {
@@ -213,6 +214,9 @@ function check_push_queue_status() {
         if ($counts['processing'] > 0) {
             $status = 'building';
             $message = 'Processing';
+        } elseif ($counts['failed'] > 0) {
+            $status = 'warning';
+            $message = 'Failures detected';
         }
         
         return [
@@ -220,7 +224,10 @@ function check_push_queue_status() {
             'status' => $status,
             'message' => "Status: {$message}",
             'details' => [
-                'Queued' => $counts['queued']
+                'Queued' => $counts['queued'],
+                'Processing' => $counts['processing'],
+                'Completed' => $counts['completed'],
+                'Failed' => $counts['failed']
             ]
         ];
     } catch (Exception $e) {

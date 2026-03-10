@@ -120,11 +120,11 @@ function handlePushJobsApi($method, $pathParts) {
         $limit = (int)($_GET['limit'] ?? 100);
         $limit = max(1, min(500, $limit));
 
-        $allowedStatuses = ['queued', 'processing', 'completed'];
+        $allowedStatuses = ['queued', 'processing', 'completed', 'failed'];
         if (!empty($statusFilter) && !in_array($statusFilter, $allowedStatuses, true)) {
             return [
                 'success' => false,
-                'error' => 'Invalid status filter. Allowed: queued, processing, completed',
+                'error' => 'Invalid status filter. Allowed: queued, processing, completed, failed',
                 'APICode' => 'T-0002'
             ];
         }
@@ -165,7 +165,8 @@ function handlePushJobsApi($method, $pathParts) {
         $counts = [
             'queued' => 0,
             'processing' => 0,
-            'completed' => 0
+            'completed' => 0,
+            'failed' => 0
         ];
 
         foreach ($countStmt->fetchAll() as $row) {
@@ -459,18 +460,48 @@ function processNextQueuedPushReleaseJob() {
             ];
         }
 
-        $runResult = executeQueuedPushReleaseJob($job);
+        try {
+            $runResult = executeQueuedPushReleaseJob($job);
+        } catch (Throwable $e) {
+            $runResult = [
+                'success' => false,
+                'error' => $e->getMessage()
+            ];
+            error_log('[push-worker] Unhandled exception while processing job #' . $jobId . ': ' . $e->getMessage());
+        }
+
         completePushQueueJob($db, $jobId, $runResult['success'], $runResult['error'] ?? null);
 
-        $callbackResult = triggerPushCompletionCallback($db, $job, $runResult);
+        $updatedJob = getPushQueueJobById($db, $jobId) ?: $job;
+
+        try {
+            $callbackResult = triggerPushCompletionCallback($db, $updatedJob, $runResult);
+        } catch (Throwable $e) {
+            $callbackResult = [
+                'sent' => false,
+                'error' => $e->getMessage()
+            ];
+            error_log('[push-worker] Completion callback failed for job #' . $jobId . ': ' . $e->getMessage());
+        }
+
+        try {
+            $discordWebhookResult = triggerPushFailureDiscordWebhook($updatedJob, $runResult);
+        } catch (Throwable $e) {
+            $discordWebhookResult = [
+                'sent' => false,
+                'error' => $e->getMessage()
+            ];
+            error_log('[push-worker] Discord failure webhook failed for job #' . $jobId . ': ' . $e->getMessage());
+        }
 
         return [
             'success' => true,
-            'status' => 'processed',
+            'status' => $runResult['success'] ? 'processed' : 'failed',
             'jobId' => $jobId,
             'jobSuccess' => (bool)$runResult['success'],
-            'message' => $runResult['success'] ? 'Push job completed' : 'Push job completed with errors',
-            'callback' => $callbackResult
+            'message' => $runResult['success'] ? 'Push job completed' : 'Push job failed',
+            'callback' => $callbackResult,
+            'discordWebhook' => $discordWebhookResult
         ];
     } catch (Exception $e) {
         error_log('Push queue worker error: ' . $e->getMessage());
@@ -494,7 +525,8 @@ function markPushQueueJobAsProcessing($db, $jobId) {
 
 function completePushQueueJob($db, $jobId, $success, $errorMessage = null) {
     $nowExpr = getDatabaseNowExpression();
-    $stmt = $db->prepare("\n        UPDATE push_release_queue\n        SET status = 'completed', success = ?, error_message = ?, completed_at = $nowExpr, updated_at = $nowExpr\n        WHERE id = ?\n    ");
+    $finalStatus = $success ? 'completed' : 'failed';
+    $stmt = $db->prepare("\n        UPDATE push_release_queue\n        SET status = '$finalStatus', success = ?, error_message = ?, completed_at = $nowExpr, updated_at = $nowExpr\n        WHERE id = ?\n    ");
     $stmt->execute([$success ? 1 : 0, $errorMessage, $jobId]);
 }
 
@@ -624,6 +656,126 @@ function triggerPushCompletionCallback($db, $job, $runResult) {
     ];
 }
 
+function triggerPushFailureDiscordWebhook($job, $runResult) {
+    if (!empty($runResult['success'])) {
+        return [
+            'sent' => false,
+            'skipped' => true,
+            'reason' => 'Job succeeded'
+        ];
+    }
+
+    $config = getPushFailureDiscordWebhookConfig();
+    if (!$config['enabled']) {
+        return [
+            'sent' => false,
+            'skipped' => true,
+            'reason' => 'Discord failure webhook disabled or URL missing'
+        ];
+    }
+
+    $jobId = (int)($job['id'] ?? 0);
+    $codename = $job['codename'] ?? 'unknown';
+    $errorMessage = trim((string)($runResult['error'] ?? $job['error_message'] ?? 'Unknown push failure'));
+
+    $messageContent = "**CDN Push Release Error**\n";
+    $messageContent .= "Error occurred when pushing release for {$codename}\n\n";
+    $messageContent .= "{$errorMessage}\n\n";
+    $messageContent .= "<@180736511354863627> Please investigate ASAP";
+
+    $payload = [
+        'username' => $config['username'],
+        'content' => $messageContent,
+        'allowed_mentions' => [
+            'parse' => ['users']
+        ]
+    ];
+
+    if ($config['avatarUrl'] !== '') {
+        $payload['avatar_url'] = $config['avatarUrl'];
+    }
+
+    $result = sendJsonWebhookRequest($config['url'], $payload);
+    error_log('[push-worker] Discord failure webhook result for job #' . $jobId . ': ' . json_encode($result));
+
+    return $result;
+}
+
+function sendJsonWebhookRequest($url, $payload) {
+    $responseBody = '';
+    $httpCode = 0;
+    $error = null;
+    $body = json_encode($payload);
+
+    if ($body === false) {
+        return [
+            'sent' => false,
+            'httpCode' => 0,
+            'error' => 'Failed to encode webhook payload'
+        ];
+    }
+
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/json',
+            'Content-Length: ' . strlen($body)
+        ]);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 20);
+
+        $response = curl_exec($ch);
+        if ($response === false) {
+            $error = curl_error($ch);
+        } else {
+            $responseBody = (string)$response;
+        }
+
+        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+    } else {
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => "Content-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\n",
+                'content' => $body,
+                'timeout' => 20,
+                'ignore_errors' => true
+            ]
+        ]);
+
+        $response = @file_get_contents($url, false, $context);
+        if ($response === false) {
+            $error = 'HTTP webhook failed (curl extension unavailable)';
+        } else {
+            $responseBody = (string)$response;
+        }
+
+        if (isset($http_response_header) && is_array($http_response_header)) {
+            foreach ($http_response_header as $headerLine) {
+                if (preg_match('/HTTP\/\d\.\d\s+(\d{3})/', $headerLine, $matches)) {
+                    $httpCode = (int)$matches[1];
+                    break;
+                }
+            }
+        }
+    }
+
+    if ($error === null && ($httpCode < 200 || $httpCode >= 300)) {
+        $error = 'Webhook returned HTTP ' . $httpCode;
+    }
+
+    return [
+        'sent' => $error === null,
+        'httpCode' => $httpCode,
+        'error' => $error,
+        'response' => substr($responseBody, 0, 1000)
+    ];
+}
+
 function getPushCompletionCallbackConfig() {
     $sendUpdateRaw = getenv('PUSH_SEND_UPDATE');
     $sendUpdate = false;
@@ -637,6 +789,19 @@ function getPushCompletionCallbackConfig() {
     return [
         'enabled' => $sendUpdate && $url !== '',
         'url' => $url
+    ];
+}
+
+function getPushFailureDiscordWebhookConfig() {
+    $url = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_URL') ?: ''));
+    $username = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_USERNAME') ?: 'Evolution X Push Worker'));
+    $avatarUrl = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_AVATAR_URL') ?: ''));
+
+    return [
+        'enabled' => $url !== '',
+        'url' => $url,
+        'username' => $username,
+        'avatarUrl' => $avatarUrl
     ];
 }
 

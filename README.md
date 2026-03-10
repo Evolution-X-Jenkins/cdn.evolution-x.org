@@ -538,6 +538,11 @@ DB_PASS=database_password
 # Push API Authentication
 PUSH_API_TOKEN=your-secret-token
 
+# Discord failure notifications (optional)
+DISCORD_PUSH_FAILURE_WEBHOOK_URL=https://discord.com/api/webhooks/...
+DISCORD_PUSH_FAILURE_WEBHOOK_USERNAME=Evolution X Push Worker
+DISCORD_PUSH_FAILURE_WEBHOOK_AVATAR_URL=
+
 # Jenkins Integration (optional)
 JENKINS_URL=https://your-jenkins.com
 JENKINS_JOB_NAME=deploy-rom
@@ -607,9 +612,10 @@ define('PRESIGNED_URL_EXPIRY', 3600);
 **Tasks:**
 1. Fetch next queued job from push_release_queue
 2. Copy files from pre-release to production
-3. Update job status (queued → processing → completed)
+3. Update job status (queued → processing → completed/failed)
 4. Send callback to Jenkins if configured
-5. Log all operations with detailed status
+5. Send Discord webhook message if a push fails and webhook is configured
+6. Log all operations with detailed status
 
 **Crontab entry:**
 ```cron
@@ -669,7 +675,7 @@ CREATE TABLE push_release_queue (
     requested_by VARCHAR(128) DEFAULT 'unknown',
     source_path VARCHAR(1024) NOT NULL,
     destination_path VARCHAR(1024) NOT NULL,
-    status ENUM('queued', 'processing', 'completed') NOT NULL DEFAULT 'queued',
+    status ENUM('queued', 'processing', 'completed', 'failed') NOT NULL DEFAULT 'queued',
     success TINYINT(1) DEFAULT NULL,
     error_message TEXT NULL,
     callback_enabled TINYINT(1) NOT NULL DEFAULT 0,

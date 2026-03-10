@@ -358,7 +358,7 @@ curl -X POST "http://localhost:8000/api/push" \
 
 | Parameter | Type | Required | Description | Values |
 |-----------|------|----------|-------------|--------|
-| `status` | string | No | Filter by job status | `queued`, `processing`, `completed` |
+| `status` | string | No | Filter by job status | `queued`, `processing`, `completed`, `failed` |
 | `limit` | integer | No | Result limit (default: 100, max: 500) | `50` |
 
 **Response:**
@@ -437,6 +437,8 @@ curl "http://localhost:8000/api/push/jobs?status=queued" \
   }
 }
 ```
+
+If a push job fails during processing, it is marked with `"status": "failed"` and `error_message` contains the reason. If `DISCORD_PUSH_FAILURE_WEBHOOK_URL` is configured, the worker also sends a Discord webhook notification.
 
 **Example:**
 ```bash

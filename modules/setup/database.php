@@ -78,7 +78,7 @@ class Database {
                     requested_by VARCHAR(128) DEFAULT 'unknown',
                     source_path VARCHAR(1024) NOT NULL,
                     destination_path VARCHAR(1024) NOT NULL,
-                    status ENUM('queued', 'processing', 'completed') NOT NULL DEFAULT 'queued',
+                    status ENUM('queued', 'processing', 'completed', 'failed') NOT NULL DEFAULT 'queued',
                     success TINYINT(1) DEFAULT NULL,
                     error_message TEXT NULL,
                     callback_enabled TINYINT(1) NOT NULL DEFAULT 0,
@@ -95,6 +95,7 @@ class Database {
             ";
             try {
                 $this->pdo->exec($sql);
+                $this->migratePushReleaseQueueSchema();
             } catch (Exception $e) {
                 error_log("Cache table creation failed (may already exist): " . $e->getMessage());
             }
@@ -165,7 +166,25 @@ class Database {
         ";
         
         $this->pdo->exec($sql);
+        $this->migratePushReleaseQueueSchema();
         
+    }
+
+    private function migratePushReleaseQueueSchema() {
+        try {
+            if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+                $stmt = $this->pdo->query("SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'push_release_queue' AND COLUMN_NAME = 'status' LIMIT 1");
+                $columnType = strtolower((string)$stmt->fetchColumn());
+
+                if ($columnType !== '' && strpos($columnType, "'failed'") === false) {
+                    $this->pdo->exec("ALTER TABLE push_release_queue MODIFY COLUMN status ENUM('queued', 'processing', 'completed', 'failed') NOT NULL DEFAULT 'queued'");
+                }
+            }
+
+            $this->pdo->exec("UPDATE push_release_queue SET status = 'failed' WHERE status = 'completed' AND success = 0");
+        } catch (Exception $e) {
+            error_log('Push queue schema migration skipped: ' . $e->getMessage());
+        }
     }
     
     public function getConnection() {

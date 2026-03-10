@@ -66,6 +66,19 @@ try {
                 log_push_queue("Callback failed: $error");
             }
         }
+
+        if (isset($pushQueueResult['discordWebhook'])) {
+            $discordWebhook = $pushQueueResult['discordWebhook'];
+            if ($discordWebhook['sent'] ?? false) {
+                $httpCode = $discordWebhook['httpCode'] ?? 0;
+                log_push_queue("Discord failure webhook sent successfully (HTTP $httpCode)");
+            } elseif ($discordWebhook['skipped'] ?? false) {
+                log_push_queue("Discord failure webhook skipped: " . ($discordWebhook['reason'] ?? 'unknown'));
+            } else {
+                $error = $discordWebhook['error'] ?? 'unknown error';
+                log_push_queue("Discord failure webhook failed: $error");
+            }
+        }
     }
     
 } catch (Exception $e) {
