@@ -85,6 +85,6 @@ ob_start();
 
 <?php
 $content = ob_get_clean();
-$page_title = 'File Browser - ' . ($relative_path === '/' ? 'Home' : basename($relative_path));
+$page_title = 'Evolution X CDN - ' . ($relative_path === '/' ? 'Home' : basename($relative_path));
 include 'layout.php';
 ?>

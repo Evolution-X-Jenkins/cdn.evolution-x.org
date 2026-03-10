@@ -12,8 +12,14 @@ class BucketCache {
     private $max_age = 3600; // 1 hour cache validity
     
     public function __construct() {
-        $this->cache_file = sys_get_temp_dir() . '/filebrowser_bucket_cache.json';
-        $this->lock_file = sys_get_temp_dir() . '/filebrowser_bucket_cache.lock';
+        // Ensure cache directory exists
+        $cache_dir = __DIR__ . '/../../data/cache';
+        if (!file_exists($cache_dir)) {
+            mkdir($cache_dir, 0755, true);
+        }
+        
+        $this->cache_file = $cache_dir . '/bucket_cache.json';
+        $this->lock_file = $cache_dir . '/bucket_cache.lock';
     }
     
     /**
