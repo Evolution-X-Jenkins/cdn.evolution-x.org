@@ -6,13 +6,15 @@
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/bucket_cache.php';
+require_once __DIR__ . '/../setup/database.php';
 
 function show_health_page() {
     // Check various system components
     $health_checks = [
         'r2' => check_r2_status(),
         'jenkins' => check_jenkins_status(),
-        'bucket' => check_bucket_status()
+        'bucket' => check_bucket_status(),
+        'push_queue' => check_push_queue_status()
     ];
     
     // Overall system status
@@ -186,4 +188,47 @@ function check_bucket_status() {
         ];
     }
 }
-?>
+function check_push_queue_status() {
+    try {
+        $db = Database::getInstance()->getConnection();
+        
+        // Get counts by status
+        $stmt = $db->query('SELECT status, COUNT(*) as count FROM push_release_queue GROUP BY status');
+        $counts = [
+            'queued' => 0,
+            'processing' => 0,
+            'completed' => 0
+        ];
+        
+        foreach ($stmt->fetchAll() as $row) {
+            if (isset($counts[$row['status']])) {
+                $counts[$row['status']] = (int)$row['count'];
+            }
+        }
+        
+        // Determine simple status
+        $status = 'healthy';
+        $message = 'Waiting';
+        
+        if ($counts['processing'] > 0) {
+            $status = 'building';
+            $message = 'Processing';
+        }
+        
+        return [
+            'name' => 'Push Release Queue',
+            'status' => $status,
+            'message' => "Status: {$message}",
+            'details' => [
+                'Queued' => $counts['queued']
+            ]
+        ];
+    } catch (Exception $e) {
+        return [
+            'name' => 'Push Release Queue',
+            'status' => 'error',
+            'message' => 'Queue status unavailable',
+            'details' => []
+        ];
+    }
+}?>

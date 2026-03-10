@@ -97,6 +97,19 @@ function handleApiRequest() {
                 jsonResponse($result, $status);
             }
             break;
+
+        case 'push-jobs':
+            $result = handlePushJobsApi($method, $pathParts);
+            if (isset($result['APICode'])) {
+                $statusMap = [
+                    'T-0002' => 400,
+                    'T-0003' => 401,
+                    'T-0006' => 500
+                ];
+                $status = $statusMap[$result['APICode']] ?? 200;
+                jsonResponse($result, $status);
+            }
+            break;
             
         case 'download-statistics':
         case 'download-stats':
@@ -140,7 +153,7 @@ function handleApiRequest() {
             $result = [
                 'error' => 'Unknown API endpoint',
                 'endpoint' => $endpoint,
-                'available' => ['push', 'download-statistics', 'daily-downloads', 'daily-summary', 'file-hashes', 'store-hashes', 'file-operations', 'health', 'fetch-ota-hashes']
+                'available' => ['push', 'push-jobs', 'download-statistics', 'daily-downloads', 'daily-summary', 'file-hashes', 'store-hashes', 'file-operations', 'health', 'fetch-ota-hashes']
             ];
             jsonResponse($result, 404);
     }

@@ -5,6 +5,7 @@
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
+require_once __DIR__ . '/../core/health.php';
 
 function handleHealthApi($method, $pathParts) {
     switch ($method) {
@@ -80,6 +81,22 @@ function performHealthChecks() {
         'required' => $requiredExtensions,
         'missing' => $missingExtensions
     ];
+    
+    // Add push queue status
+    try {
+        $pushQueueStatus = check_push_queue_status();
+        $checks['push_queue'] = [
+            'status' => $pushQueueStatus['status'],
+            'message' => $pushQueueStatus['message'],
+            'details' => $pushQueueStatus['details']
+        ];
+    } catch (Exception $e) {
+        $checks['push_queue'] = [
+            'status' => 'error',
+            'message' => 'Push queue check failed',
+            'details' => ['error' => $e->getMessage()]
+        ];
+    }
     
     // Determine overall status
     $overallStatus = 'healthy';

@@ -68,6 +68,30 @@ class Database {
                     cached_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     INDEX idx_cached_at (cached_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+                CREATE TABLE IF NOT EXISTS push_release_queue (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    codename VARCHAR(128) NOT NULL,
+                    release_date DATE NOT NULL,
+                    version VARCHAR(16) NOT NULL,
+                    build_type VARCHAR(32) NOT NULL,
+                    requested_by VARCHAR(128) DEFAULT 'unknown',
+                    source_path VARCHAR(1024) NOT NULL,
+                    destination_path VARCHAR(1024) NOT NULL,
+                    status ENUM('queued', 'processing', 'completed') NOT NULL DEFAULT 'queued',
+                    success TINYINT(1) DEFAULT NULL,
+                    error_message TEXT NULL,
+                    callback_enabled TINYINT(1) NOT NULL DEFAULT 0,
+                    callback_url VARCHAR(2048) NULL,
+                    callback_http_code INT NULL,
+                    callback_response TEXT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    started_at DATETIME NULL,
+                    completed_at DATETIME NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX idx_push_release_queue_status_created (status, created_at),
+                    INDEX idx_push_release_queue_created (created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             ";
             try {
                 $this->pdo->exec($sql);
@@ -107,12 +131,37 @@ class Database {
                 cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- Push release queue (single-process release worker)
+            CREATE TABLE IF NOT EXISTS push_release_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                codename VARCHAR(128) NOT NULL,
+                release_date VARCHAR(32) NOT NULL,
+                version VARCHAR(16) NOT NULL,
+                build_type VARCHAR(32) NOT NULL,
+                requested_by VARCHAR(128) DEFAULT 'unknown',
+                source_path VARCHAR(1024) NOT NULL,
+                destination_path VARCHAR(1024) NOT NULL,
+                status VARCHAR(16) NOT NULL DEFAULT 'queued',
+                success INTEGER DEFAULT NULL,
+                error_message TEXT,
+                callback_enabled INTEGER NOT NULL DEFAULT 0,
+                callback_url VARCHAR(2048),
+                callback_http_code INTEGER,
+                callback_response TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                started_at DATETIME,
+                completed_at DATETIME,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             -- Create indexes for better performance
             CREATE INDEX IF NOT EXISTS idx_download_stats_filename ON download_stats(filename);
             CREATE INDEX IF NOT EXISTS idx_download_stats_folder ON download_stats(folder);
             CREATE INDEX IF NOT EXISTS idx_download_stats_time ON download_stats(download_time);
             CREATE INDEX IF NOT EXISTS idx_download_stat_key ON download_stat(key_path);
             CREATE INDEX IF NOT EXISTS idx_cache_time ON download_stats_cache(cached_at);
+            CREATE INDEX IF NOT EXISTS idx_push_release_queue_status_created ON push_release_queue(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_push_release_queue_created ON push_release_queue(created_at);
         ";
         
         $this->pdo->exec($sql);
