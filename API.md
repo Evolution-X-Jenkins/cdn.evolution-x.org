@@ -148,7 +148,9 @@ curl http://localhost:8000/api/health
 
 ### 2. Download Statistics
 
-**Endpoint:** `GET /api/download/statistics`
+**Endpoint:** `GET /api/download-statistics`
+
+**Alias:** `GET /api/download-stats`
 
 **Description:** Retrieve download statistics with flexible filtering options.
 
@@ -195,22 +197,27 @@ curl http://localhost:8000/api/health
 
 Get overall statistics:
 ```bash
-curl "http://localhost:8000/api/download/statistics"
+curl "http://localhost:8000/api/download-statistics"
 ```
 
 Get statistics for specific device:
 ```bash
-curl "http://localhost:8000/api/download/statistics?folder=OnePlus/OnePlus6&limit=10"
+curl "http://localhost:8000/api/download-statistics?folder=OnePlus/OnePlus6&limit=10"
 ```
 
 Get statistics for date range:
 ```bash
-curl "http://localhost:8000/api/download/statistics?timeStart=2024-01-01&timeEnd=2024-12-31"
+curl "http://localhost:8000/api/download-statistics?timeStart=2024-01-01&timeEnd=2024-12-31"
 ```
 
 Filter by filename pattern:
 ```bash
-curl "http://localhost:8000/api/download/statistics?filename=evolution-x-8.0"
+curl "http://localhost:8000/api/download-statistics?filename=evolution-x-8.0"
+```
+
+Using the alias endpoint:
+```bash
+curl "http://localhost:8000/api/download-stats?folder=OnePlus/OnePlus6&limit=10"
 ```
 
 ---
@@ -482,37 +489,89 @@ curl "http://localhost:8000/api/push/stats" \
 
 **Endpoint:** `GET /api/daily-downloads`
 
-**Description:** Get daily download statistics aggregated by date.
+**Description:** Get per-file download statistics for a single day.
 
 **Authentication:** None
 
-**Query Parameters:**
+**Path Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `days` | integer | No | Number of days to retrieve (default: 30) |
-| `filename` | string | No | Filter by filename pattern |
+| `{date}` | string | No | Date in `YYYY-MM-DD` format; defaults to yesterday |
 
 **Response:**
 ```json
 {
-  "success": true,
-  "data": [
+  "fordate": "2024-01-01",
+  "summary": {
+    "total_downloads": 1523,
+    "unique_files_downloaded": 245,
+    "total_download_events": 1523
+  },
+  "individual_files": [
     {
-      "date": "2024-01-01",
-      "downloads": 1523
+      "filename": "OnePlus/OnePlus6/evolution-x-8.0-OnePlus6-20240101.zip",
+      "downloads": 168
     },
     {
-      "date": "2024-01-02",
-      "downloads": 1687
+      "filename": "Google/akita/evolution-x-16-akita-20240101.zip",
+      "downloads": 121
     }
   ]
 }
 ```
 
-**Example:**
+**Examples:**
 ```bash
-curl "http://localhost:8000/api/daily-downloads?days=7"
+curl "http://localhost:8000/api/daily-downloads"
+```
+
+```bash
+curl "http://localhost:8000/api/daily-downloads/2024-01-01"
+```
+
+---
+
+### 9. Daily Summary
+
+**Endpoint:** `GET /api/daily-summary`
+
+**Description:** Get daily totals for the last 7 days by default.
+
+**Authentication:** None
+
+**Path Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `{days}` | integer | No | Number of days to summarize; defaults to `7`, allowed range `1-30` |
+
+**Response:**
+```json
+{
+  "period": "7 days",
+  "daily_summary": [
+    {
+      "date": "2024-01-07",
+      "unique_files": 180,
+      "total_downloads": 1321
+    },
+    {
+      "date": "2024-01-06",
+      "unique_files": 176,
+      "total_downloads": 1288
+    }
+  ]
+}
+```
+
+**Examples:**
+```bash
+curl "http://localhost:8000/api/daily-summary"
+```
+
+```bash
+curl "http://localhost:8000/api/daily-summary/14"
 ```
 
 ---
@@ -590,7 +649,7 @@ params = {
     'limit': 10
 }
 response = requests.get(
-    'http://localhost:8000/api/download/statistics',
+  'http://localhost:8000/api/download-statistics',
     params=params
 )
 stats = response.json()
@@ -630,7 +689,7 @@ async function checkHealth() {
 
 // Download statistics
 async function getStats() {
-  const response = await axios.get('http://localhost:8000/api/download/statistics', {
+  const response = await axios.get('http://localhost:8000/api/download-statistics', {
     params: {
       folder: 'OnePlus/OnePlus6',
       limit: 10
@@ -669,7 +728,16 @@ async function queueRelease() {
 curl http://localhost:8000/api/health
 
 # Download statistics with filters
-curl "http://localhost:8000/api/download/statistics?folder=OnePlus/OnePlus6&limit=10"
+curl "http://localhost:8000/api/download-statistics?folder=OnePlus/OnePlus6&limit=10"
+
+# Download statistics using the alias
+curl "http://localhost:8000/api/download-stats?folder=OnePlus/OnePlus6&limit=10"
+
+# Single-day detailed downloads
+curl "http://localhost:8000/api/daily-downloads/2024-01-01"
+
+# 14-day summary
+curl "http://localhost:8000/api/daily-summary/14"
 
 # File hashes
 curl "http://localhost:8000/api/hash?file=OnePlus/OnePlus6/file.zip"

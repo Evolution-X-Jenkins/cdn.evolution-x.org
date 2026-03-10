@@ -280,7 +280,7 @@ API Request → Queue → Background Worker → Callback
 ### API Statistics Flow
 
 ```
-1. GET /api/download/statistics?folder=X
+1. GET /api/download-statistics?folder=X
    ↓
 2. Parse and validate parameters
    ↓
@@ -523,7 +523,10 @@ Pattern: `/api/{resource}/{action}`
 Examples:
 ```
 GET  /api/health              # Check system health
-GET  /api/download/statistics # Get download stats
+GET  /api/download-statistics # Get download stats
+GET  /api/download-stats      # Alias for download statistics
+GET  /api/daily-downloads     # Get one day's per-file download stats
+GET  /api/daily-summary       # Get multi-day download totals
 POST /api/push                # Queue push release
 GET  /api/push/jobs           # List jobs
 GET  /api/push/jobs/42        # Get specific job

@@ -323,7 +323,13 @@ Located in `static/`:
 ### Download Statistics
 
 ```http
-GET /api/download/statistics
+GET /api/download-statistics
+```
+
+Alias also supported:
+
+```http
+GET /api/download-stats
 ```
 
 Query parameters:
@@ -748,7 +754,7 @@ curl http://localhost:8000/api/health
 
 **Test statistics:**
 ```bash
-curl "http://localhost:8000/api/download/statistics?limit=10"
+curl "http://localhost:8000/api/download-statistics?limit=10"
 ```
 
 **Test push API (with token):**

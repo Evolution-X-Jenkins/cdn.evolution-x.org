@@ -701,7 +701,7 @@ Add to Nginx config:
 proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=filebrowser_cache:10m max_size=1g inactive=60m use_temp_path=off;
 
 # In server block
-location /api/download/statistics {
+location /api/download-statistics {
     proxy_cache filebrowser_cache;
     proxy_cache_valid 200 5m;
     proxy_cache_key "$request_uri";
