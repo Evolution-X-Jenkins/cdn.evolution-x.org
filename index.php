@@ -31,6 +31,12 @@ if ($clean_path === 'health') {
     exit;
 }
 
+if ($clean_path === 'stats') {
+    require_once 'stats.php';
+    show_stats_page();
+    exit;
+}
+
 // Block Robots
 if (strpos($clean_path, 'robots.txt') === 0) {
     header('Content-Type: text/plain');

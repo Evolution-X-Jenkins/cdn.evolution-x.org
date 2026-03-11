@@ -12,6 +12,7 @@ require_once __DIR__ . '/modules/api/file_operations.php';
 require_once __DIR__ . '/modules/api/health.php';
 require_once __DIR__ . '/modules/api/push.php';
 require_once __DIR__ . '/modules/api/daily_downloads.php';
+require_once __DIR__ . '/modules/api/stats_dashboard.php';
 require_once __DIR__ . '/modules/api/hash_management.php';
 require_once __DIR__ . '/modules/api/store_hashes.php';
 require_once __DIR__ . '/api/fetch-ota-hashes.php';
@@ -128,6 +129,10 @@ function handleApiRequest() {
         case 'daily-summary':
             $result = handleDailyDownloadsSummaryApi($method, $pathParts);
             break;
+
+        case 'stats-dashboard':
+            $result = handleStatsDashboardApi($method, $pathParts);
+            break;
             
         case 'file-hashes':
             $result = handleFileHashesApi($method, $pathParts);
@@ -153,7 +158,7 @@ function handleApiRequest() {
             $result = [
                 'error' => 'Unknown API endpoint',
                 'endpoint' => $endpoint,
-                'available' => ['push', 'push-jobs', 'download-statistics', 'daily-downloads', 'daily-summary', 'file-hashes', 'store-hashes', 'file-operations', 'health', 'fetch-ota-hashes']
+                'available' => ['push', 'push-jobs', 'download-statistics', 'daily-downloads', 'daily-summary', 'stats-dashboard', 'file-hashes', 'store-hashes', 'file-operations', 'health', 'fetch-ota-hashes']
             ];
             jsonResponse($result, 404);
     }
