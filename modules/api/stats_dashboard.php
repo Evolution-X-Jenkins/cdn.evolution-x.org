@@ -6,6 +6,7 @@
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
+require_once __DIR__ . '/../core/device_names.php';
 
 function handleStatsDashboardApi($method, $pathParts) {
     if ($method !== 'GET') {
@@ -392,11 +393,13 @@ function buildTopDevices($pdo, $timeframe, $selectedDevice, $limit) {
         $deviceCounts[$device] += (int)$row['downloads'];
     }
 
+    $resolvedNames = resolveDeviceNames(array_keys($deviceCounts));
+
     $all = [];
     foreach ($deviceCounts as $device => $downloads) {
         $all[] = [
             'device' => $device,
-            'display_name' => formatDeviceName($device),
+            'display_name' => formatDeviceDisplayName($device, $resolvedNames[$device] ?? null),
             'downloads' => $downloads
         ];
     }
