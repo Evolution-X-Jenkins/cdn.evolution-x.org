@@ -84,11 +84,6 @@ ob_start();
             </div>
         </div>
 
-        <div class="mb-4 text-sm text-gray-300">
-            Most downloaded device: <span id="top-device-name" class="text-white font-semibold">-</span>
-            <span id="top-device-downloads" class="text-[#0060ff] font-semibold ml-2">0</span>
-        </div>
-
         <div class="overflow-x-auto rounded-lg border border-gray-700">
             <table class="min-w-full text-sm">
                 <thead class="bg-gray-800/80 text-gray-300 uppercase text-xs tracking-wide">
