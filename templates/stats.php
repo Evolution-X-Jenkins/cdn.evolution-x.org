@@ -98,6 +98,16 @@ ob_start();
     </div>
 </div>
 
+<div id="stats-loading-overlay" class="fixed inset-0 z-[70] bg-[#040214]/80 backdrop-blur-sm hidden">
+    <div class="h-full w-full flex items-center justify-center px-4">
+        <div class="bg-[#0f172a] border-2 border-[#0060ff] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg p-6 text-center max-w-sm w-full">
+            <div class="mx-auto mb-4 w-12 h-12 border-4 border-[#0060ff]/30 border-t-[#0060ff] rounded-full animate-spin"></div>
+            <h3 id="stats-loading-title" class="text-xl font-semibold text-white">Loading statistics...</h3>
+            <p id="stats-loading-message" class="text-sm text-gray-300 mt-2">Fetching latest download information</p>
+        </div>
+    </div>
+</div>
+
 <script>
 (function () {
     const state = {
@@ -121,8 +131,13 @@ ob_start();
         topDevicesTable: document.getElementById('top-devices-table'),
         topDeviceName: document.getElementById('top-device-name'),
         topDeviceDownloads: document.getElementById('top-device-downloads'),
+        loadingOverlay: document.getElementById('stats-loading-overlay'),
+        loadingTitle: document.getElementById('stats-loading-title'),
+        loadingMessage: document.getElementById('stats-loading-message'),
         error: document.getElementById('stats-error')
     };
+
+    let loadingRequests = 0;
 
     function formatNumber(value) {
         return Number(value || 0).toLocaleString();
@@ -145,6 +160,30 @@ ob_start();
     function clearError() {
         el.error.classList.add('hidden');
         el.error.textContent = '';
+    }
+
+    function beginLoading(title = 'Loading statistics...', message = 'Fetching latest download information') {
+        loadingRequests++;
+
+        if (el.loadingTitle) {
+            el.loadingTitle.textContent = title;
+        }
+
+        if (el.loadingMessage) {
+            el.loadingMessage.textContent = message;
+        }
+
+        if (el.loadingOverlay) {
+            el.loadingOverlay.classList.remove('hidden');
+        }
+    }
+
+    function endLoading() {
+        loadingRequests = Math.max(0, loadingRequests - 1);
+
+        if (loadingRequests === 0 && el.loadingOverlay) {
+            el.loadingOverlay.classList.add('hidden');
+        }
     }
 
     async function fetchJson(url) {
@@ -220,12 +259,14 @@ ob_start();
     }
 
     function renderTopDevices() {
-        if (state.topDevice) {
-            el.topDeviceName.textContent = state.topDevice.display_name || state.topDevice.device || '-';
-            el.topDeviceDownloads.textContent = formatNumber(state.topDevice.downloads || 0);
-        } else {
-            el.topDeviceName.textContent = '-';
-            el.topDeviceDownloads.textContent = '0';
+        if (el.topDeviceName && el.topDeviceDownloads) {
+            if (state.topDevice) {
+                el.topDeviceName.textContent = state.topDevice.display_name || state.topDevice.device || '-';
+                el.topDeviceDownloads.textContent = formatNumber(state.topDevice.downloads || 0);
+            } else {
+                el.topDeviceName.textContent = '-';
+                el.topDeviceDownloads.textContent = '0';
+            }
         }
 
         if (!state.topDevices.length) {
@@ -246,11 +287,14 @@ ob_start();
     }
 
     async function refreshDashboard() {
+        beginLoading('Loading statistics...', 'Fetching latest download information');
         try {
             clearError();
             await loadStatsDashboard();
         } catch (error) {
             showError('Failed to update stats: ' + error.message);
+        } finally {
+            endLoading();
         }
     }
 
@@ -291,13 +335,7 @@ ob_start();
 
     async function initialize() {
         registerEvents();
-
-        try {
-            clearError();
-            await loadStatsDashboard();
-        } catch (error) {
-            showError('Failed to load stats dashboard: ' + error.message);
-        }
+        await refreshDashboard();
     }
 
     document.addEventListener('DOMContentLoaded', initialize);
