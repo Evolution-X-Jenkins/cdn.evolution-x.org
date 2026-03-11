@@ -53,7 +53,7 @@ ob_start();
 
         <div id="breakdown-chart" class="bg-gray-800 rounded-lg p-4 overflow-x-auto">
             <div id="breakdown-bars" class="flex items-end justify-between space-x-2 px-2 min-w-[320px]" style="height: 200px; overflow: visible;"></div>
-            <div class="text-xs text-gray-500 mt-2 text-center">Chart shows daily download counts</div>
+            <div id="breakdown-caption" class="text-xs text-gray-500 mt-2 text-center">Chart shows daily download counts</div>
         </div>
     </div>
 
@@ -128,6 +128,7 @@ ob_start();
         devicesTimeframe: document.getElementById('devices-timeframe'),
         deviceFilter: document.getElementById('device-filter'),
         breakdownBars: document.getElementById('breakdown-bars'),
+        breakdownCaption: document.getElementById('breakdown-caption'),
         topDevicesTable: document.getElementById('top-devices-table'),
         topDeviceName: document.getElementById('top-device-name'),
         topDeviceDownloads: document.getElementById('top-device-downloads'),
@@ -138,6 +139,9 @@ ob_start();
     };
 
     let loadingRequests = 0;
+    const CACHE_TTL_MS = 5 * 60 * 1000;
+    const dashboardCache = new Map();
+    const timeframeOptions = ['today', '7d', '30d', 'all'];
 
     function formatNumber(value) {
         return Number(value || 0).toLocaleString();
@@ -197,16 +201,101 @@ ob_start();
         return payload;
     }
 
-    async function loadStatsDashboard() {
-        const params = new URLSearchParams();
-        params.set('breakdownTimeframe', state.breakdownTimeframe);
-        params.set('devicesTimeframe', state.devicesTimeframe);
-        const deviceValue = (state.device || '').trim();
-        if (deviceValue !== '') {
-            params.set('device', deviceValue);
+    function getDashboardCacheKey(params) {
+        return JSON.stringify({
+            breakdownTimeframe: params.breakdownTimeframe,
+            devicesTimeframe: params.devicesTimeframe,
+            device: (params.device || '').trim().toLowerCase()
+        });
+    }
+
+    function getCachedDashboard(params) {
+        const cacheKey = getDashboardCacheKey(params);
+        const cached = dashboardCache.get(cacheKey);
+        if (!cached) {
+            return null;
         }
 
-        const payload = await fetchJson('/api/stats-dashboard?' + params.toString());
+        if ((Date.now() - cached.cachedAt) > CACHE_TTL_MS) {
+            dashboardCache.delete(cacheKey);
+            return null;
+        }
+
+        return cached.payload;
+    }
+
+    function setCachedDashboard(params, payload) {
+        const cacheKey = getDashboardCacheKey(params);
+        dashboardCache.set(cacheKey, {
+            cachedAt: Date.now(),
+            payload
+        });
+    }
+
+    async function fetchDashboardPayload(params, preferCache = true) {
+        if (preferCache) {
+            const cached = getCachedDashboard(params);
+            if (cached) {
+                return cached;
+            }
+        }
+
+        const query = new URLSearchParams();
+        query.set('breakdownTimeframe', params.breakdownTimeframe);
+        query.set('devicesTimeframe', params.devicesTimeframe);
+
+        const deviceValue = (params.device || '').trim();
+        if (deviceValue !== '') {
+            query.set('device', deviceValue);
+        }
+
+        const payload = await fetchJson('/api/stats-dashboard?' + query.toString());
+        setCachedDashboard(params, payload);
+        return payload;
+    }
+
+    async function prefetchLikelyDashboardCombos() {
+        const baseDevice = '';
+        const prefetchParams = [];
+
+        timeframeOptions.forEach((tf) => {
+            if (tf !== state.breakdownTimeframe) {
+                prefetchParams.push({
+                    breakdownTimeframe: tf,
+                    devicesTimeframe: state.devicesTimeframe,
+                    device: baseDevice
+                });
+            }
+
+            if (tf !== state.devicesTimeframe) {
+                prefetchParams.push({
+                    breakdownTimeframe: state.breakdownTimeframe,
+                    devicesTimeframe: tf,
+                    device: baseDevice
+                });
+            }
+        });
+
+        const unique = new Map();
+        prefetchParams.forEach((params) => {
+            unique.set(getDashboardCacheKey(params), params);
+        });
+
+        for (const params of unique.values()) {
+            try {
+                await fetchDashboardPayload(params, true);
+            } catch (error) {
+                // Ignore prefetch failures; interactive fetches still handle errors.
+            }
+        }
+    }
+
+    async function loadStatsDashboard() {
+        const payload = await fetchDashboardPayload({
+            breakdownTimeframe: state.breakdownTimeframe,
+            devicesTimeframe: state.devicesTimeframe,
+            device: state.device
+        }, true);
 
         state.totalDownloads = Number((payload.summary && payload.summary.total_downloads) || 0);
         state.sinceDate = (payload.summary && payload.summary.since_date) || null;
@@ -231,10 +320,23 @@ ob_start();
     function renderBreakdownChart() {
         if (!state.breakdownSeries.length) {
             el.breakdownBars.innerHTML = '<div class="text-gray-400 text-sm">No breakdown data available.</div>';
+            if (el.breakdownCaption) {
+                el.breakdownCaption.textContent = state.breakdownTimeframe === 'all'
+                    ? 'Chart shows monthly download counts'
+                    : 'Chart shows daily download counts';
+            }
             return;
         }
 
+        if (el.breakdownCaption) {
+            el.breakdownCaption.textContent = state.breakdownTimeframe === 'all'
+                ? 'Chart shows monthly download counts'
+                : 'Chart shows daily download counts';
+        }
+
         const max = Math.max(...state.breakdownSeries.map((item) => Number(item.downloads || 0)), 1);
+
+        const useCompactBars = state.breakdownSeries.length > 14;
 
         el.breakdownBars.innerHTML = state.breakdownSeries.map((item) => {
             const downloads = Number(item.downloads || 0);
@@ -242,16 +344,17 @@ ob_start();
                 ? Math.max(8, Math.round((downloads / max) * 130))
                 : 4;
 
-            const isToday = item.date === new Date().toISOString().slice(0, 10);
+            const itemLabel = item.label || item.day || item.date || '';
+            const isToday = !item.label && item.date === new Date().toISOString().slice(0, 10);
 
             return `
-                <div class="flex flex-col items-center flex-1">
+                <div class="flex flex-col items-center ${useCompactBars ? 'w-12 flex-shrink-0' : 'flex-1'}">
                     <div
                         class="w-full ${downloads > 0 ? 'bg-[#0060ff] hover:bg-[#004bb5]' : 'bg-gray-600 hover:bg-gray-500'} rounded-t-sm transition-all duration-300 shadow-sm"
                         style="height: ${height}px; min-height: 4px;"
-                        title="${escapeHtml(item.day)} (${escapeHtml(item.date)}): ${downloads} downloads"
+                        title="${escapeHtml(itemLabel)}: ${downloads} downloads"
                     ></div>
-                    <div class="text-xs mt-1 font-medium ${isToday ? 'text-[#0060ff] font-semibold' : 'text-gray-400'}">${escapeHtml(item.day)}</div>
+                    <div class="text-xs mt-1 font-medium ${isToday ? 'text-[#0060ff] font-semibold' : 'text-gray-400'}">${escapeHtml(itemLabel)}</div>
                     <div class="text-xs ${downloads > 0 ? 'text-white font-medium' : 'text-gray-500'}">${formatNumber(downloads)}</div>
                 </div>
             `;
@@ -336,6 +439,7 @@ ob_start();
     async function initialize() {
         registerEvents();
         await refreshDashboard();
+        prefetchLikelyDashboardCombos();
     }
 
     document.addEventListener('DOMContentLoaded', initialize);

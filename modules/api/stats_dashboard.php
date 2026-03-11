@@ -249,6 +249,37 @@ function buildDownloadBreakdownSeries($pdo, $timeframe, $selectedDevice = '') {
     [$startAt, $endAt] = resolveStatsDateRange($timeframe);
     $clause = buildStatsWhereClause($startAt, $endAt, $selectedDevice);
 
+    if ($timeframe === 'all') {
+        $monthExpr = (defined('DB_TYPE') && DB_TYPE === 'mysql')
+            ? "DATE_FORMAT(download_time, '%Y-%m')"
+            : "strftime('%Y-%m', download_time)";
+
+        $stmt = $pdo->prepare('
+            SELECT ' . $monthExpr . ' as month_key, MIN(DATE(download_time)) as period_start, COUNT(*) as downloads
+            FROM download_stats
+            WHERE ' . $clause['where'] . '
+            GROUP BY month_key
+            ORDER BY month_key ASC
+        ');
+        $stmt->execute($clause['params']);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $series = [];
+        foreach ($rows as $row) {
+            $periodStart = (string)($row['period_start'] ?? '');
+            $dateObj = $periodStart !== '' ? new DateTime($periodStart) : null;
+
+            $series[] = [
+                'date' => $periodStart,
+                'day' => $dateObj ? $dateObj->format('M') : (string)($row['month_key'] ?? ''),
+                'label' => $dateObj ? $dateObj->format('M Y') : (string)($row['month_key'] ?? ''),
+                'downloads' => (int)$row['downloads']
+            ];
+        }
+
+        return $series;
+    }
+
     $stmt = $pdo->prepare('
         SELECT DATE(download_time) as download_date, COUNT(*) as downloads
         FROM download_stats
