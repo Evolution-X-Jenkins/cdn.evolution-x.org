@@ -208,11 +208,6 @@ ob_start();
         });
     }
 
-        if (loadingRequests === 0 && el.loadingOverlay) {
-            el.loadingOverlay.classList.add('hidden');
-        }
-    }
-
     async function fetchJson(url) {
         const response = await fetch(url, { headers: { 'Accept': 'application/json' } });
         const payload = await response.json();
