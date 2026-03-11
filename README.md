@@ -60,6 +60,7 @@ router.php (Development Server Router)
 index.php (Main Router)
     ├── /api/* → api.php (API Router)
     ├── /health → modules/core/health.php
+    ├── /stats → stats.php (Stats Dashboard)
     ├── /pre-release/* → Pre-release handler
     └── /* → File browser / Download handler
 ```
@@ -145,6 +146,12 @@ Calculate/Fetch (and backfill all caches)
 - Launches PHP built-in server on localhost:8000
 - Filters verbose connection logs
 - Handles graceful shutdown
+
+**stats.php**
+- Stats dashboard page controller
+- Serves the `/stats` page
+- Includes the `templates/stats.php` view
+- Provides `show_stats_page()` entry point
 
 #### Configuration
 
@@ -295,6 +302,14 @@ The application is organized into modular components under the `modules/` direct
 - Updates download_stat table
 - Used by background hash calculation workers
 
+**stats_dashboard.php**
+- Stats dashboard API endpoint (`GET /api/stats-dashboard`)
+- Powers all data widgets on the `/stats` page
+- Parameters: `breakdownTimeframe`, `devicesTimeframe`, `device`, `topLimit`
+- Returns summary totals, daily/monthly breakdown series, and top-devices table
+- Input validation: timeframe whitelist, device filter regex
+- Handles missing table gracefully (returns `has_data: false`)
+
 ### Templates
 
 Located in `templates/`, these PHP templates render HTML pages:
@@ -305,6 +320,7 @@ Located in `templates/`, these PHP templates render HTML pages:
 - **health.php**: Health status display
 - **info.php**: System information page
 - **pre_release_list.php**: Pre-release file listing
+- **stats.php**: Download statistics dashboard — renders total downloads, a daily/monthly breakdown bar chart, and a filterable top-devices table; fetches data from `/api/stats-dashboard` with client-side caching (5-minute TTL) and prefetches adjacent timeframe combinations on load
 
 ### Static Assets
 
@@ -435,6 +451,44 @@ Returns:
   "sha256": "789ghi...",
   "file_size": 1234567890,
   "status": "ready"
+}
+```
+
+### Stats Dashboard
+
+```http
+GET /api/stats-dashboard
+```
+
+Powers the `/stats` page. Query parameters:
+- `breakdownTimeframe` - Timeframe for the chart: `today`, `7d`, `30d`, `all` (default: `7d`)
+- `devicesTimeframe` - Timeframe for the top-devices table: `today`, `7d`, `30d`, `all` (default: `7d`)
+- `device` - Codename filter for the top-devices table (e.g. `akita`); omit or pass `all` for all devices
+- `topLimit` - Max rows in top-devices table (1–100, default: 25)
+
+Response format:
+```json
+{
+  "success": true,
+  "has_data": true,
+  "table_available": true,
+  "filters": { "breakdown_timeframe": "7d", "devices_timeframe": "7d", "device": "all", "top_limit": 25 },
+  "summary": { "total_downloads": 12345, "since_date": "2024-01-01" },
+  "download_breakdown": {
+    "timeframe": "7d",
+    "series": [
+      { "date": "2024-03-05", "day": "Wed", "label": "Wed", "downloads": 430 }
+    ]
+  },
+  "top_devices": {
+    "timeframe": "7d",
+    "rows": [
+      { "device": "akita", "display_name": "Google Pixel 9", "downloads": 312 }
+    ],
+    "top_device": { "device": "akita", "display_name": "Google Pixel 9", "downloads": 312 }
+  },
+  "devices_available": ["akita", "sweet", "oneplus6"],
+  "selected_device": { "device": "all", "downloads": 12345, "exists": true }
 }
 ```
 

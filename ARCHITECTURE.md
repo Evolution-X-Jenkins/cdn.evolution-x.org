@@ -234,6 +234,7 @@ API Request → Queue → Background Worker → Callback
 - `push.php` - Push release management
 - `daily_downloads.php` - Time-series statistics
 - `hash_management.php` - File hash API
+- `stats_dashboard.php` - Stats dashboard endpoint (`GET /api/stats-dashboard`)
 
 **Pattern:** Handler functions per endpoint
 
@@ -325,6 +326,30 @@ API Request → Queue → Background Worker → Callback
 11. Send Discord failure webhook (if configured and job failed)
    ↓
 12. Log results
+```
+
+### Stats Dashboard Flow
+
+```
+1. Browser loads /stats page
+   ↓
+2. JS calls GET /api/stats-dashboard?breakdownTimeframe=7d&devicesTimeframe=7d
+   ↓
+3. stats_dashboard.php validates timeframe and device filter inputs
+   ↓
+4. Three independent queries run against download_stats:
+   a. Total count + earliest date (summary)
+   b. GROUP BY day/month (breakdown series)
+   c. GROUP BY folder, ORDER BY downloads DESC (top devices)
+   ↓
+5. Device codenames resolved to display names via device_names.php
+   ↓
+6. Single JSON response returned with all three sections
+   ↓
+7. Browser renders summary total, bar chart, and table
+   ↓
+8. JS prefetches other timeframe combinations into a local 5-minute cache
+   (avoids repeat network requests on timeframe/filter changes)
 ```
 
 ---

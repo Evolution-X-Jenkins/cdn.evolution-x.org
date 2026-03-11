@@ -578,6 +578,104 @@ curl "http://localhost:8000/api/daily-summary/14"
 
 ---
 
+### 10. Stats Dashboard
+
+**Endpoint:** `GET /api/stats-dashboard`
+
+**Description:** Aggregated statistics powering the `/stats` page. Returns a total-downloads summary, a time-series breakdown chart, and a ranked top-devices table — all in one request.
+
+**Authentication:** None
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description | Default |
+|-----------|------|----------|-------------|---------|
+| `breakdownTimeframe` | string | No | Timeframe for the downloads chart | `7d` |
+| `devicesTimeframe` | string | No | Timeframe for the top-devices table | `7d` |
+| `device` | string | No | Codename filter for top-devices (omit or `all` for all devices) | *(all)* |
+| `topLimit` | integer | No | Max rows in top-devices table (1–100) | `25` |
+
+**Valid timeframe values:** `today`, `7d`, `30d`, `all`
+
+Aliases accepted: `1d` → `today`, `week` / `last7` → `7d`, `month` / `last30` → `30d`, `alltime` → `all`
+
+**Device filter:** Letters, numbers, `.`, `_`, `-` only. Empty string, `all`, or `*` returns all devices.
+
+**Response:**
+```json
+{
+  "success": true,
+  "has_data": true,
+  "table_available": true,
+  "filters": {
+    "breakdown_timeframe": "7d",
+    "devices_timeframe": "7d",
+    "device": "all",
+    "top_limit": 25
+  },
+  "summary": {
+    "total_downloads": 12345,
+    "since_date": "2024-01-01"
+  },
+  "download_breakdown": {
+    "timeframe": "7d",
+    "series": [
+      { "date": "2024-03-05", "day": "Wed", "label": "Wed", "downloads": 430 },
+      { "date": "2024-03-06", "day": "Thu", "label": "Thu", "downloads": 512 }
+    ]
+  },
+  "top_devices": {
+    "timeframe": "7d",
+    "rows": [
+      { "device": "akita", "display_name": "Google Pixel 9", "downloads": 312 },
+      { "device": "sweet", "display_name": "Xiaomi Redmi Note 10 Pro", "downloads": 278 }
+    ],
+    "top_device": {
+      "device": "akita",
+      "display_name": "Google Pixel 9",
+      "downloads": 312
+    }
+  },
+  "devices_available": ["akita", "sweet", "oneplus6"],
+  "selected_device": {
+    "device": "all",
+    "downloads": 12345,
+    "exists": true
+  }
+}
+```
+
+**Series format notes:**
+- For `today`, `7d`, and `30d`: each series item represents one calendar day; `day` is the short weekday name (Mon–Sun) and `label` matches `day`.
+- For `all`: each series item represents one calendar month; `day` is the abbreviated month name (Jan–Dec) and `label` is `"Mon YYYY"`.
+- Days/months with zero downloads are included as gaps (zero value) to preserve continuity in charts.
+
+**When the stats table is unavailable** (e.g. fresh environment with no data), the response still returns `success: true` with `has_data: false`, `table_available: false`, and empty/zero values for all sections.
+
+**Examples:**
+
+Default (last 7 days for both sections):
+```bash
+curl "http://localhost:8000/api/stats-dashboard"
+```
+
+30-day chart, all-time top devices:
+```bash
+curl "http://localhost:8000/api/stats-dashboard?breakdownTimeframe=30d&devicesTimeframe=all"
+```
+
+Filter top devices to a single device:
+```bash
+curl "http://localhost:8000/api/stats-dashboard?devicesTimeframe=7d&device=akita"
+```
+
+Top 10 devices only:
+```bash
+curl "http://localhost:8000/api/stats-dashboard?topLimit=10"
+```
+
+---
+
 ## Rate Limiting
 
 Currently, no rate limiting is enforced. However, please be considerate:
