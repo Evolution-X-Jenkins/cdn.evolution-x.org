@@ -28,7 +28,10 @@ ob_start();
 
     <div id="stats-error" class="hidden bg-red-900/40 border border-red-500 text-red-200 rounded-lg p-4 text-sm"></div>
 
-    <div class="bg-green-900 border-2 border-green-500 rounded-lg p-6 text-center">
+    <div id="stats-summary-section" class="relative bg-green-900 border-2 border-green-500 rounded-lg p-6 text-center overflow-hidden">
+        <div id="stats-loading-summary" class="absolute inset-0 z-10 bg-[#040214]/65 backdrop-blur-sm flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-150 ease-out">
+            <div class="w-10 h-10 border-4 border-[#0060ff]/30 border-t-[#0060ff] rounded-full animate-spin"></div>
+        </div>
         <div class="text-4xl mb-2">📥</div>
         <h2 class="text-2xl font-bold text-white">Total Downloads</h2>
         <p class="text-gray-300 mt-2">Since <span id="since-date" class="font-medium">N/A</span></p>
@@ -37,7 +40,10 @@ ob_start();
 
     <div class="border-t border-white/10"></div>
 
-    <div class="bg-[#0f172a] border border-gray-700 rounded-lg p-6">
+    <div id="stats-breakdown-section" class="relative bg-[#0f172a] border border-gray-700 rounded-lg p-6 overflow-hidden">
+        <div id="stats-loading-breakdown" class="absolute inset-0 z-10 bg-[#040214]/65 backdrop-blur-sm flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-150 ease-out">
+            <div class="w-10 h-10 border-4 border-[#0060ff]/30 border-t-[#0060ff] rounded-full animate-spin"></div>
+        </div>
         <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
             <h2 class="text-2xl font-semibold text-white">Download Breakdown</h2>
             <div class="w-full md:w-72">
@@ -59,7 +65,10 @@ ob_start();
 
     <div class="border-t border-white/10"></div>
 
-    <div class="bg-[#0f172a] border border-gray-700 rounded-lg p-6">
+    <div id="stats-top-devices-section" class="relative bg-[#0f172a] border border-gray-700 rounded-lg p-6 overflow-hidden">
+        <div id="stats-loading-top-devices" class="absolute inset-0 z-10 bg-[#040214]/65 backdrop-blur-sm flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-150 ease-out">
+            <div class="w-10 h-10 border-4 border-[#0060ff]/30 border-t-[#0060ff] rounded-full animate-spin"></div>
+        </div>
         <div class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-4">
             <h2 class="text-2xl font-semibold text-white">Top Devices</h2>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 w-full lg:w-auto">
@@ -98,16 +107,6 @@ ob_start();
     </div>
 </div>
 
-<div id="stats-loading-overlay" class="fixed inset-0 z-[70] bg-[#040214]/80 backdrop-blur-sm hidden">
-    <div class="h-full w-full flex items-center justify-center px-4">
-        <div class="bg-[#0f172a] border-2 border-[#0060ff] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg p-6 text-center max-w-sm w-full">
-            <div class="mx-auto mb-4 w-12 h-12 border-4 border-[#0060ff]/30 border-t-[#0060ff] rounded-full animate-spin"></div>
-            <h3 id="stats-loading-title" class="text-xl font-semibold text-white">Loading statistics...</h3>
-            <p id="stats-loading-message" class="text-sm text-gray-300 mt-2">Fetching latest download information</p>
-        </div>
-    </div>
-</div>
-
 <script>
 (function () {
     const state = {
@@ -132,13 +131,17 @@ ob_start();
         topDevicesTable: document.getElementById('top-devices-table'),
         topDeviceName: document.getElementById('top-device-name'),
         topDeviceDownloads: document.getElementById('top-device-downloads'),
-        loadingOverlay: document.getElementById('stats-loading-overlay'),
-        loadingTitle: document.getElementById('stats-loading-title'),
-        loadingMessage: document.getElementById('stats-loading-message'),
+        summaryLoadingOverlay: document.getElementById('stats-loading-summary'),
+        breakdownLoadingOverlay: document.getElementById('stats-loading-breakdown'),
+        topDevicesLoadingOverlay: document.getElementById('stats-loading-top-devices'),
         error: document.getElementById('stats-error')
     };
 
-    let loadingRequests = 0;
+    const loadingSectionCounts = {
+        summary: 0,
+        breakdown: 0,
+        topDevices: 0
+    };
     const CACHE_TTL_MS = 5 * 60 * 1000;
     const dashboardCache = new Map();
     const timeframeOptions = ['today', '7d', '30d', 'all'];
@@ -166,24 +169,44 @@ ob_start();
         el.error.textContent = '';
     }
 
-    function beginLoading(title = 'Loading statistics...', message = 'Fetching latest download information') {
-        loadingRequests++;
-
-        if (el.loadingTitle) {
-            el.loadingTitle.textContent = title;
-        }
-
-        if (el.loadingMessage) {
-            el.loadingMessage.textContent = message;
-        }
-
-        if (el.loadingOverlay) {
-            el.loadingOverlay.classList.remove('hidden');
-        }
+    function getLoadingOverlayElement(sectionKey) {
+        if (sectionKey === 'summary') return el.summaryLoadingOverlay;
+        if (sectionKey === 'breakdown') return el.breakdownLoadingOverlay;
+        if (sectionKey === 'topDevices') return el.topDevicesLoadingOverlay;
+        return null;
     }
 
-    function endLoading() {
-        loadingRequests = Math.max(0, loadingRequests - 1);
+    function beginSectionLoading(sectionKeys) {
+        sectionKeys.forEach((sectionKey) => {
+            if (!(sectionKey in loadingSectionCounts)) {
+                return;
+            }
+
+            loadingSectionCounts[sectionKey]++;
+            const overlay = getLoadingOverlayElement(sectionKey);
+            if (overlay) {
+                overlay.classList.remove('opacity-0', 'pointer-events-none');
+                overlay.classList.add('opacity-100');
+            }
+        });
+    }
+
+    function endSectionLoading(sectionKeys) {
+        sectionKeys.forEach((sectionKey) => {
+            if (!(sectionKey in loadingSectionCounts)) {
+                return;
+            }
+
+            loadingSectionCounts[sectionKey] = Math.max(0, loadingSectionCounts[sectionKey] - 1);
+            if (loadingSectionCounts[sectionKey] === 0) {
+                const overlay = getLoadingOverlayElement(sectionKey);
+                if (overlay) {
+                    overlay.classList.remove('opacity-100');
+                    overlay.classList.add('opacity-0', 'pointer-events-none');
+                }
+            }
+        });
+    }
 
         if (loadingRequests === 0 && el.loadingOverlay) {
             el.loadingOverlay.classList.add('hidden');
@@ -389,15 +412,15 @@ ob_start();
         `).join('');
     }
 
-    async function refreshDashboard() {
-        beginLoading('Loading statistics...', 'Fetching latest download information');
+    async function refreshDashboard(sectionKeys = ['summary', 'breakdown', 'topDevices']) {
+        beginSectionLoading(sectionKeys);
         try {
             clearError();
             await loadStatsDashboard();
         } catch (error) {
             showError('Failed to update stats: ' + error.message);
         } finally {
-            endLoading();
+            endSectionLoading(sectionKeys);
         }
     }
 
@@ -406,12 +429,12 @@ ob_start();
 
         el.breakdownTimeframe.addEventListener('change', () => {
             state.breakdownTimeframe = el.breakdownTimeframe.value;
-            refreshDashboard();
+            refreshDashboard(['breakdown']);
         });
 
         el.devicesTimeframe.addEventListener('change', () => {
             state.devicesTimeframe = el.devicesTimeframe.value;
-            refreshDashboard();
+            refreshDashboard(['topDevices']);
         });
 
         el.deviceFilter.addEventListener('input', () => {
@@ -421,7 +444,7 @@ ob_start();
 
             deviceFilterDebounceTimer = setTimeout(() => {
                 state.device = (el.deviceFilter.value || '').trim();
-                refreshDashboard();
+                refreshDashboard(['topDevices']);
             }, 350);
         });
 
@@ -432,7 +455,7 @@ ob_start();
             }
 
             state.device = (el.deviceFilter.value || '').trim();
-            refreshDashboard();
+            refreshDashboard(['topDevices']);
         });
     }
 
