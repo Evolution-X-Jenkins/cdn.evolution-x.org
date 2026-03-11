@@ -83,6 +83,9 @@ function show_info_page($relative_file_path, $full_file_path) {
             }
         }
     }
+
+    // Ensure chronological order for chart rendering (oldest -> newest)
+    ksort($chart_data);
     
     // Get file hashes from download_stat table
     $hashes = [];
