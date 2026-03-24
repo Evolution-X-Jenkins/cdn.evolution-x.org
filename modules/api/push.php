@@ -573,6 +573,24 @@ function executeQueuedPushReleaseJob($job) {
         ];
     }
 
+    if (!verifyDirectoryCopyIntegrity($sourcePath, $destPath)) {
+        $message = "Background processing failed copy verification for job #$jobId";
+        error_log("[push-worker] $message");
+        return [
+            'success' => false,
+            'error' => $message
+        ];
+    }
+
+    if (!removeDirectoryRecursively($sourcePath)) {
+        $message = "Push completed but failed to remove pre-release source directory for job #$jobId: $sourcePath";
+        error_log("[push-worker] $message");
+        return [
+            'success' => false,
+            'error' => $message
+        ];
+    }
+
     $cache = new BucketCache();
     $cache->invalidateCache();
 
@@ -839,7 +857,9 @@ function copyRecursively($source, $dest) {
     }
 
     if (!is_dir($dest)) {
-        mkdir($dest, 0755, true);
+        if (!mkdir($dest, 0755, true) && !is_dir($dest)) {
+            return false;
+        }
     }
 
     $iterator = new RecursiveIteratorIterator(
@@ -852,14 +872,74 @@ function copyRecursively($source, $dest) {
 
         if ($item->isDir()) {
             if (!is_dir($destPath)) {
-                mkdir($destPath, 0755, true);
+                if (!mkdir($destPath, 0755, true) && !is_dir($destPath)) {
+                    return false;
+                }
             }
         } else {
-            copy($item, $destPath);
+            if (!copy($item->getPathname(), $destPath)) {
+                return false;
+            }
         }
     }
 
     return true;
+}
+
+function verifyDirectoryCopyIntegrity($source, $dest) {
+    if (!is_dir($source) || !is_dir($dest)) {
+        return false;
+    }
+
+    $sourceIterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS)
+    );
+
+    foreach ($sourceIterator as $item) {
+        if (!$item->isFile()) {
+            continue;
+        }
+
+        $relativePath = $sourceIterator->getSubPathName();
+        $destPath = $dest . DIRECTORY_SEPARATOR . $relativePath;
+
+        if (!is_file($destPath)) {
+            return false;
+        }
+
+        if (filesize($item->getPathname()) !== filesize($destPath)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function removeDirectoryRecursively($path) {
+    if (!is_dir($path)) {
+        return false;
+    }
+
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
+
+    foreach ($iterator as $item) {
+        $itemPath = $item->getPathname();
+
+        if ($item->isDir()) {
+            if (!rmdir($itemPath)) {
+                return false;
+            }
+        } else {
+            if (!unlink($itemPath)) {
+                return false;
+            }
+        }
+    }
+
+    return rmdir($path);
 }
 
 function clearHashesForPath($path) {
