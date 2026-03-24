@@ -51,7 +51,7 @@ ob_start();
     </div>
     
     <!-- Service Status Cards -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6 mb-8">
         <?php foreach ($health_checks as $key => $check): ?>
             <?php
             $card_class = 'border-green-500';
