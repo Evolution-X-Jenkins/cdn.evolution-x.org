@@ -81,18 +81,21 @@ if (preg_match('/^(.+?)\/download$/', $clean_path, $matches)) {
    $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
 
    // Allow specific user agents to bypass countdown
-   $allowedAgents = ['evoxupdater', 'wget', 'curl', 'aria2', 'php'];
+   $allowedAgents = ['evoxupdater', 'evox updater', 'wget', 'curl', 'aria2', 'php'];
    $userAgentLower = strtolower($userAgent);
    foreach ($allowedAgents as $agent) {
         if (strpos($userAgentLower, $agent) !== false) {
             log_action('Direct download (user agent bypass)', $target_file);
-      	    $DownloadResult = DownloadRom($target_file, false);
+            $DownloadResult = DownloadRom($target_file, false);
             if (!$DownloadResult) {
-       	        http_response_code(404);
-               	echo json_encode(['error' => 'File not found']);
+                http_response_code(404);
+                echo json_encode(['error' => 'File not found']);
                 exit;
-       	    }
-       }
+            }
+            // DownloadRom exits internally on success via redirect_to_r2;
+            // this exit is a safety net in case that ever changes.
+            exit;
+        }
     }
 } elseif (preg_match('/^(.+?)\/direct-download$/', $clean_path, $matches)) {
     $is_direct_download = true;
@@ -116,7 +119,7 @@ if (preg_match('/^(.+?)\/download$/', $clean_path, $matches)) {
         $clean_path = '';
     }
 
-   $DownloadResult = DownloadRom($clean_path, true);
+   $DownloadResult = DownloadRom($target_file, true);
    if (!$DownloadResult) {
         http_response_code(404);
         echo json_encode(['error' => 'File not found']);
@@ -154,8 +157,10 @@ if ($is_download) {
         exit;
     } else {
         log_action('Download failed - file not found', $target_file);
-        // File not found, redirect to directory
-        header('Location: /' . dirname($target_file));
+        // Return JSON 404 so updater clients get a parseable error, not an HTML redirect
+        http_response_code(404);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'File not found']);
         exit;
     }
 }
