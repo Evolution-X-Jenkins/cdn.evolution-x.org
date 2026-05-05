@@ -86,7 +86,7 @@ async function startDownload() {
     
     // Try regular R2 download
     console.log('Attempting R2 download...');
-    const downloadUrl = '/<?php echo addslashes($file_path); ?>/direct-download';
+    const downloadUrl = '/<?php echo addslashes($file_path); ?>/download';
     
     // Create hidden iframe for download
     const iframe = document.createElement('iframe');

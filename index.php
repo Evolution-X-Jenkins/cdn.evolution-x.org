@@ -65,6 +65,7 @@ if (strpos($clean_path, 'pre-release') === 0) {
 
 // Check if this is a download or stats request
 $is_download = false;
+$is_download_page = false;
 $is_direct_download = false;
 $is_proxy_download = false;
 $is_stats = false;
@@ -76,26 +77,12 @@ if (preg_match('/^(.+?)\/download$/', $clean_path, $matches)) {
     if ($clean_path === '.') {
        $clean_path = '';
     }
-
-   // Check for user agents that should bypass countdown
-   $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
-
-   // Allow specific user agents to bypass countdown
-   $allowedAgents = ['evoxupdater', 'evox updater', 'wget', 'curl', 'aria2', 'php'];
-   $userAgentLower = strtolower($userAgent);
-   foreach ($allowedAgents as $agent) {
-        if (strpos($userAgentLower, $agent) !== false) {
-            log_action('Direct download (user agent bypass)', $target_file);
-            $DownloadResult = DownloadRom($target_file, false);
-            if (!$DownloadResult) {
-                http_response_code(404);
-                echo json_encode(['error' => 'File not found']);
-                exit;
-            }
-            // DownloadRom exits internally on success via redirect_to_r2;
-            // this exit is a safety net in case that ever changes.
-            exit;
-        }
+} elseif (preg_match('/^(.+?)\/download-page$/', $clean_path, $matches)) {
+    $is_download_page = true;
+    $target_file = $matches[1];
+    $clean_path = dirname($target_file);
+    if ($clean_path === '.') {
+       $clean_path = '';
     }
 } elseif (preg_match('/^(.+?)\/direct-download$/', $clean_path, $matches)) {
     $is_direct_download = true;
@@ -104,13 +91,6 @@ if (preg_match('/^(.+?)\/download$/', $clean_path, $matches)) {
     if ($clean_path === '.') {
         $clean_path = '';
     }
-
-   $DownloadResult = DownloadRom($target_file, false);
-   if (!$DownloadResult) {
-        http_response_code(404);
-        echo json_encode(['error' => 'File not found']);
-        exit;
-   }
 } elseif (preg_match('/^(.+?)\/proxy-download$/', $clean_path, $matches)) {
     $is_proxy_download = true;
     $target_file = $matches[1];
@@ -118,13 +98,6 @@ if (preg_match('/^(.+?)\/download$/', $clean_path, $matches)) {
     if ($clean_path === '.') {
         $clean_path = '';
     }
-
-   $DownloadResult = DownloadRom($target_file, true);
-   if (!$DownloadResult) {
-        http_response_code(404);
-        echo json_encode(['error' => 'File not found']);
-        exit;
-   }
 } elseif (preg_match('/^(.+?)\/stats$/', $clean_path, $matches)) {
     $is_stats = true;
     $target_file = $matches[1];
@@ -134,10 +107,24 @@ if (preg_match('/^(.+?)\/download$/', $clean_path, $matches)) {
     }
 }
 
-// Handle download requests - show download page with countdown
-if ($is_download) {
+// Bare file URLs (e.g. /folder/file.zip) should open the countdown page.
+if (!$is_download && !$is_download_page && !$is_direct_download && !$is_proxy_download && !$is_stats && $clean_path !== '') {
+    $resolved_path = sanitize_path($clean_path, BASE_PATH);
+    if (is_file($resolved_path)) {
+        $is_download_page = true;
+        $target_file = $clean_path;
+        $clean_path = dirname($target_file);
+        if ($clean_path === '.') {
+            $clean_path = '';
+        }
+    }
+}
+
+// Handle download page requests - show download page with countdown
+if ($is_download_page) {
     require_once 'modules/core/download.php';
     $file_path = sanitize_path($target_file, BASE_PATH);
+    $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
     if (is_file($file_path)) {
         log_action('Download page accessed', $target_file);
 
@@ -165,13 +152,49 @@ if ($is_download) {
     }
 }
 
-// Handle direct download requests - immediate R2 redirect
+// Handle direct stream download requests
+if ($is_download || $is_direct_download) {
+   $DownloadResult = DownloadRom($target_file, false);
+   if (!$DownloadResult) {
+        http_response_code(404);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'File not found']);
+        exit;
+   }
+}
+
+if ($is_proxy_download) {
+    $DownloadResult = DownloadRom($target_file, true);
+    if (!$DownloadResult) {
+          http_response_code(404);
+          header('Content-Type: application/json');
+          echo json_encode(['error' => 'File not found']);
+          exit;
+    }
+}
+
+// Handle direct download requests - immediate R2 stream-through
 function DownloadRom($target_file, $proxy) {
+    global $db;
     require_once 'modules/setup/r2_download.php';
     $file_path = sanitize_path($target_file, BASE_PATH);
     if (is_file($file_path)) {
         log_action('Direct download requested', $target_file);
-        redirect_to_r2($target_file, $proxy); // false = regular R2 download / true = use fallback/proxy
+
+        // Record download statistics for direct/proxy delivery paths.
+        $userId = get_user_id();
+        $ipAddress = $_SERVER['REMOTE_ADDR'] ?? '';
+        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+        $referer = $_SERVER['HTTP_REFERER'] ?? '';
+        $fileSize = filesize($file_path);
+
+        try {
+            $db->recordDownload($target_file, $userId, $ipAddress, $userAgent, $referer, $fileSize);
+        } catch (Exception $e) {
+            error_log('Failed to record download: ' . $e->getMessage());
+        }
+
+        redirect_to_r2($target_file, $proxy); // false = regular stream / true = stream with fallback marker header
         exit;
     } else {
         log_action('Direct download failed - file not found', $target_file);

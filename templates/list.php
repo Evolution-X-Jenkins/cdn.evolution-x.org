@@ -59,7 +59,7 @@ ob_start();
                     </a>
                 <?php else: ?>
                     <div class="flex items-center justify-between space-x-2 text-white border-2 border-[#0060ff] bg-[#0f172a] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg px-4 py-2 duration-100 ease-in hover:scale-105 hover:shadow-[0px_0px_38.5px_18px_#0060ff50]">
-                        <a href="<?php echo htmlspecialchars($item['path'] . '/download'); ?>" class="flex items-center space-x-2 flex-grow">
+                        <a href="<?php echo htmlspecialchars($item['path']); ?>" class="flex items-center space-x-2 flex-grow">
                             <?php echo get_file_icon($item['name'], false); ?>
                             <span><?php echo htmlspecialchars($item['name']); ?></span>
                         </a>
