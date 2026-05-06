@@ -582,13 +582,22 @@ function executeQueuedPushReleaseJob($job) {
         ];
     }
 
-    if (!removeDirectoryRecursively($sourcePath)) {
-        $message = "Push completed but failed to remove pre-release source directory for job #$jobId: $sourcePath";
-        error_log("[push-worker] $message");
-        return [
-            'success' => false,
-            'error' => $message
-        ];
+    $cleanupResult = removeDirectoryRecursively($sourcePath);
+    if (!$cleanupResult['success']) {
+        $cleanupMessage = "Push completed but failed to remove pre-release source directory for job #$jobId: $sourcePath";
+
+        if (!empty($cleanupResult['errors'])) {
+            $cleanupMessage .= ' | errors: ' . implode(' | ', array_slice($cleanupResult['errors'], 0, 5));
+        }
+
+        error_log("[push-worker] $cleanupMessage");
+
+        if (shouldFailPushOnCleanupError()) {
+            return [
+                'success' => false,
+                'error' => $cleanupMessage
+            ];
+        }
     }
 
     $cache = new BucketCache();
@@ -596,10 +605,25 @@ function executeQueuedPushReleaseJob($job) {
 
     error_log("[push-worker] Push job #$jobId completed successfully and cache invalidated");
 
-    return [
+    $result = [
         'success' => true,
         'error' => null
     ];
+
+    if (!$cleanupResult['success']) {
+        $result['warning'] = 'Pre-release cleanup failed; source files may require manual removal';
+    }
+
+    return $result;
+}
+
+function shouldFailPushOnCleanupError() {
+    $raw = getenv('PUSH_FAIL_ON_CLEANUP_ERROR');
+    if ($raw === false || trim((string)$raw) === '') {
+        return false;
+    }
+
+    return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
 }
 
 function triggerPushCompletionCallback($db, $job, $runResult) {
@@ -916,8 +940,13 @@ function verifyDirectoryCopyIntegrity($source, $dest) {
 }
 
 function removeDirectoryRecursively($path) {
+    $errors = [];
+
     if (!is_dir($path)) {
-        return false;
+        return [
+            'success' => false,
+            'errors' => ["Path is not a directory: $path"]
+        ];
     }
 
     $iterator = new RecursiveIteratorIterator(
@@ -928,18 +957,41 @@ function removeDirectoryRecursively($path) {
     foreach ($iterator as $item) {
         $itemPath = $item->getPathname();
 
+        if ($item->isLink()) {
+            if (!@unlink($itemPath)) {
+                $errors[] = "Failed to remove symlink: $itemPath";
+            }
+            continue;
+        }
+
         if ($item->isDir()) {
-            if (!rmdir($itemPath)) {
-                return false;
+            if (!@rmdir($itemPath)) {
+                @chmod($itemPath, 0755);
+                if (!@rmdir($itemPath)) {
+                    $errors[] = "Failed to remove directory: $itemPath";
+                }
             }
         } else {
-            if (!unlink($itemPath)) {
-                return false;
+            if (!@unlink($itemPath)) {
+                @chmod($itemPath, 0644);
+                if (!@unlink($itemPath)) {
+                    $errors[] = "Failed to remove file: $itemPath";
+                }
             }
         }
     }
 
-    return rmdir($path);
+    if (!@rmdir($path)) {
+        @chmod($path, 0755);
+        if (!@rmdir($path)) {
+            $errors[] = "Failed to remove root directory: $path";
+        }
+    }
+
+    return [
+        'success' => empty($errors),
+        'errors' => $errors
+    ];
 }
 
 function clearHashesForPath($path) {
