@@ -93,42 +93,51 @@ function handleFetchOTAHashes() {
         exit;
     }
     
-    // Store hashes in database for future use
+    // Store hashes in database for future use.
     try {
         $db = Database::getInstance();
-            $file_path_db = ltrim($file_path, '/');
-            
-            // Update or insert into download_stat table
-            $stmt = $db->getConnection()->prepare('
-                UPDATE download_stat 
-                SET md5 = ?, sha256 = ? 
-                WHERE `key` = ?
+        $pdo = $db->getConnection();
+        $file_path_db = ltrim($file_path, '/');
+        $full_path = BASE_PATH . '/' . $file_path_db;
+        $file_size = is_file($full_path) ? filesize($full_path) : null;
+
+        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+            $stmt = $pdo->prepare('
+                INSERT INTO download_stat (`key`, count, md5, sha256, file_size)
+                VALUES (?, 0, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    md5 = VALUES(md5),
+                    sha256 = VALUES(sha256),
+                    file_size = COALESCE(VALUES(file_size), file_size)
             ');
-            
             $stmt->execute([
+                $file_path_db,
                 $found_hashes['md5'],
                 $found_hashes['sha256'],
-                $file_path_db
+                $file_size
             ]);
-            
-            // If no rows were updated, try insert
-            if ($stmt->rowCount() === 0) {
-                $stmt = $db->getConnection()->prepare('
-                    INSERT INTO download_stat (`key`, md5, sha256) 
-                    VALUES (?, ?, ?)
-                ');
-                $stmt->execute([
-                    $file_path_db,
-                    $found_hashes['md5'],
-                    $found_hashes['sha256']
-                ]);
-            }
-            
-            error_log("Stored hashes for $file_path_db from OTA");
-        } catch (Exception $e) {
-            error_log("Failed to store hashes in database: " . $e->getMessage());
-            // Don't fail the request, still return the hashes
+        } else {
+            $stmt = $pdo->prepare('
+                INSERT INTO download_stat (key_path, count, md5, sha256, file_size)
+                VALUES (?, 0, ?, ?, ?)
+                ON CONFLICT(key_path) DO UPDATE SET
+                    md5 = excluded.md5,
+                    sha256 = excluded.sha256,
+                    file_size = COALESCE(excluded.file_size, download_stat.file_size)
+            ');
+            $stmt->execute([
+                $file_path_db,
+                $found_hashes['md5'],
+                $found_hashes['sha256'],
+                $file_size
+            ]);
         }
+
+        error_log("Stored hashes for $file_path_db from OTA");
+    } catch (Exception $e) {
+        error_log("Failed to store hashes in database: " . $e->getMessage());
+        // Don't fail the request, still return the hashes
+    }
         
         // Return success with hashes
         http_response_code(200);
