@@ -65,18 +65,14 @@ try {
 log_message("Cleaning up database...");
 try {
     $db = Database::getInstance();
-    
-    // Check if cache_entries table exists before trying to clean it
-    $tables = $db->getConnection()->query("SHOW TABLES LIKE 'cache_entries'")->fetchAll();
-    if (!empty($tables)) {
+
+    // Check if cache_entries table exists before trying to clean it.
+    if (tableExists($db->getConnection(), 'cache_entries')) {
         $stmt = $db->getConnection()->prepare('DELETE FROM cache_entries WHERE expires_at < CURRENT_TIMESTAMP');
         $stmt->execute();
         $cleaned = $stmt->rowCount();
         log_message("Cleaned $cleaned expired cache entries");
-    } else {
-        log_message("cache_entries table does not exist, skipping cleanup");
     }
-    
 } catch (Exception $e) {
     log_message("WARNING: Database cleanup had issues: " . $e->getMessage());
 }
@@ -294,4 +290,16 @@ try {
 }
 
 log_message("Cron job completed");
+
+function tableExists($pdo, $tableName) {
+    if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+        $stmt = $pdo->prepare('SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? LIMIT 1');
+        $stmt->execute([$tableName]);
+        return (bool)$stmt->fetchColumn();
+    }
+
+    $stmt = $pdo->prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1");
+    $stmt->execute([$tableName]);
+    return (bool)$stmt->fetchColumn();
+}
 ?>
