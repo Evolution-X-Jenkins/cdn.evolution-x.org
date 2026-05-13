@@ -311,6 +311,31 @@ function processPushRequest($codename, $date, $version, $buildType, $username = 
             'jobId' => $jobId,
             'queueStatus' => 'queued'
         ];
+    } catch (PDOException $e) {
+        if (isPushQueueDuplicateError($e)) {
+            $existingJob = null;
+            if (isset($db) && isset($resolved['sourcePath'])) {
+                $existingJob = findPushQueueJobBySourcePath($db, $resolved['sourcePath']);
+            }
+            $existingStatus = $existingJob['status'] ?? 'unknown';
+            $existingJobId = isset($existingJob['id']) ? (int)$existingJob['id'] : null;
+
+            error_log("[$requestId] Duplicate push queue request rejected for source path: " . ($resolved['sourcePath'] ?? 'unknown'));
+
+            return [
+                'status' => 'duplicate',
+                'APICode' => 'T-0008',
+                'message' => 'Duplicate push request for this source path already exists',
+                'jobId' => $existingJobId,
+                'queueStatus' => $existingStatus
+            ];
+        }
+
+        error_log("Unexpected PDO error in process_push_request: " . $e->getMessage());
+        return [
+            'status' => 'error',
+            'APICode' => 'T-0006'
+        ];
     } catch (Exception $e) {
         error_log("Unexpected error in process_push_request: " . $e->getMessage());
         return [
@@ -873,6 +898,26 @@ function normalizePushJobRow($job) {
         'completedAt' => $job['completed_at'] ?? null,
         'updatedAt' => $job['updated_at'] ?? null
     ];
+}
+
+function isPushQueueDuplicateError(PDOException $e) {
+    // MySQL duplicate key (23000/1062) and SQLite unique constraint violation (23000/19).
+    $errorInfo = $e->errorInfo ?? [];
+    $sqlState = $errorInfo[0] ?? $e->getCode();
+    $driverCode = isset($errorInfo[1]) ? (int)$errorInfo[1] : 0;
+    $message = strtolower($e->getMessage());
+
+    if ((string)$sqlState === '23000' && ($driverCode === 1062 || $driverCode === 19)) {
+        return true;
+    }
+
+    return strpos($message, 'duplicate') !== false || strpos($message, 'unique constraint') !== false;
+}
+
+function findPushQueueJobBySourcePath($db, $sourcePath) {
+    $stmt = $db->prepare('SELECT id, status FROM push_release_queue WHERE source_path = ? ORDER BY id DESC LIMIT 1');
+    $stmt->execute([$sourcePath]);
+    return $stmt->fetch() ?: null;
 }
 
 function copyRecursively($source, $dest) {

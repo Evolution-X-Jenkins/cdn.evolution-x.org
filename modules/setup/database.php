@@ -89,6 +89,7 @@ class Database {
                     started_at DATETIME NULL,
                     completed_at DATETIME NULL,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_push_release_queue_source_path (source_path),
                     INDEX idx_push_release_queue_status_created (status, created_at),
                     INDEX idx_push_release_queue_created (created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -96,6 +97,7 @@ class Database {
             try {
                 $this->pdo->exec($sql);
                 $this->migratePushReleaseQueueSchema();
+                $this->migratePushReleaseQueueUniqueness();
             } catch (Exception $e) {
                 error_log("Cache table creation failed (may already exist): " . $e->getMessage());
             }
@@ -161,12 +163,14 @@ class Database {
             CREATE INDEX IF NOT EXISTS idx_download_stats_time ON download_stats(download_time);
             CREATE INDEX IF NOT EXISTS idx_download_stat_key ON download_stat(key_path);
             CREATE INDEX IF NOT EXISTS idx_cache_time ON download_stats_cache(cached_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_push_release_queue_source_path ON push_release_queue(source_path);
             CREATE INDEX IF NOT EXISTS idx_push_release_queue_status_created ON push_release_queue(status, created_at);
             CREATE INDEX IF NOT EXISTS idx_push_release_queue_created ON push_release_queue(created_at);
         ";
         
         $this->pdo->exec($sql);
         $this->migratePushReleaseQueueSchema();
+        $this->migratePushReleaseQueueUniqueness();
         
     }
 
@@ -184,6 +188,28 @@ class Database {
             $this->pdo->exec("UPDATE push_release_queue SET status = 'failed' WHERE status = 'completed' AND success = 0");
         } catch (Exception $e) {
             error_log('Push queue schema migration skipped: ' . $e->getMessage());
+        }
+    }
+
+    private function migratePushReleaseQueueUniqueness() {
+        try {
+            if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+                // Keep the oldest entry per source_path to make room for the unique index.
+                $this->pdo->exec("DELETE q1 FROM push_release_queue q1 INNER JOIN push_release_queue q2 ON q1.source_path = q2.source_path AND q1.id > q2.id");
+
+                $idxStmt = $this->pdo->query("SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'push_release_queue' AND INDEX_NAME = 'uq_push_release_queue_source_path'");
+                $hasIndex = (int)$idxStmt->fetchColumn() > 0;
+                if (!$hasIndex) {
+                    $this->pdo->exec("ALTER TABLE push_release_queue ADD UNIQUE KEY uq_push_release_queue_source_path (source_path)");
+                }
+                return;
+            }
+
+            // SQLite dedupe then ensure unique index exists.
+            $this->pdo->exec("DELETE FROM push_release_queue WHERE rowid NOT IN (SELECT MIN(rowid) FROM push_release_queue GROUP BY source_path)");
+            $this->pdo->exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_push_release_queue_source_path ON push_release_queue(source_path)");
+        } catch (Exception $e) {
+            error_log('Push queue uniqueness migration skipped: ' . $e->getMessage());
         }
     }
     

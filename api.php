@@ -92,7 +92,8 @@ function handleApiRequest() {
                     'T-0004' => 405, // Method Not Allowed
                     'T-0005' => 404, // Not Found
                     'T-0006' => 500, // Internal Server Error
-                    'T-0007' => 202  // Accepted
+                    'T-0007' => 202, // Accepted
+                    'T-0008' => 409  // Conflict (duplicate queue request)
                 ];
                 $status = $statusMap[$result['APICode']] ?? 200;
                 jsonResponse($result, $status);

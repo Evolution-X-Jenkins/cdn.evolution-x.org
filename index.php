@@ -126,6 +126,23 @@ if ($is_download_page) {
     $file_path = sanitize_path($target_file, BASE_PATH);
     $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
     if (is_file($file_path)) {
+        // Allow automated clients to bypass the countdown page.
+        $allowedAgents = ['evoxupdater', 'evox updater', 'wget', 'curl', 'aria2', 'php'];
+        $userAgentLower = strtolower($userAgent);
+        foreach ($allowedAgents as $agent) {
+            if (strpos($userAgentLower, $agent) !== false) {
+                log_action('Direct download (user agent bypass)', $target_file);
+                $DownloadResult = DownloadRom($target_file, false);
+                if (!$DownloadResult) {
+                    http_response_code(404);
+                    header('Content-Type: application/json');
+                    echo json_encode(['error' => 'File not found']);
+                    exit;
+                }
+                exit;
+            }
+        }
+
         log_action('Download page accessed', $target_file);
 
         // Record download statistics

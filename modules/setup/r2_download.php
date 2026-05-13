@@ -1,7 +1,7 @@
 <?php
 /**
  * R2 Download Handler
- * Streams files from R2 through this server
+ * Redirects normal downloads to R2 and only streams through this server in fallback mode
  */
 
 require_once __DIR__ . '/config.php';
@@ -37,6 +37,22 @@ function redirect_to_r2($file_path, $use_fallback = false) {
     // Keep this function name for backwards compatibility with existing routes.
     log_action('Download initiated', $file_path);
 
+    if (!$use_fallback) {
+        $download_url = handle_r2_download($file_path, false);
+
+        if ($download_url) {
+            header('Cache-Control: no-cache, must-revalidate');
+            header('Pragma: no-cache');
+            header('Location: ' . $download_url, true, 302);
+            exit;
+        }
+
+        http_response_code(500);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'Failed to generate download link']);
+        exit;
+    }
+
     $object_key = ltrim($file_path, '/');
 
     try {
@@ -68,10 +84,7 @@ function redirect_to_r2($file_path, $use_fallback = false) {
             header('Content-Length: ' . $content_length);
         }
 
-        // For fallback mode, keep the indicator header expected by existing clients.
-        if ($use_fallback) {
-            header('X-Fallback-Mode: 1');
-        }
+        header('X-Fallback-Mode: 1');
 
         if (function_exists('set_time_limit')) {
             @set_time_limit(0);
@@ -97,11 +110,11 @@ function redirect_to_r2($file_path, $use_fallback = false) {
             $body->close();
         }
 
-        log_action('Download stream completed', $file_path);
+        log_action('Download proxy stream completed', $file_path);
         exit;
     } catch (\Throwable $e) {
         error_log("Failed to stream download for {$file_path}: " . $e->getMessage());
-        log_action('Download failed - stream error', $file_path);
+        log_action('Download failed - proxy stream error', $file_path);
         http_response_code(500);
         header('Content-Type: application/json');
         echo json_encode(['error' => 'Failed to stream file']);
