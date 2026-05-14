@@ -355,6 +355,9 @@ sudo systemctl reload apache2
    # Cache maintenance every 15 minutes
    0,15,30,45 * * * * /usr/bin/php /var/www/filebrowser/cron.php >> /var/www/filebrowser/logs/cron.log 2>&1
 
+   # Hash sync every 30 minutes (updates hashes when missing or file size changed)
+   */30 * * * * /usr/bin/php /var/www/filebrowser/cron_hashes.php >> /var/www/filebrowser/logs/cron_hashes.log 2>&1
+
    # Push queue processing every minute
    * * * * * /usr/bin/php /var/www/filebrowser/cron_push_queue.php >> /var/www/filebrowser/logs/push_queue.log 2>&1
 
