@@ -272,7 +272,8 @@ try {
             ' | db_size=' . ($storedSize === null ? 'null' : (string)$storedSize)
         );
 
-        if (!$missingHashes && !$sizeChanged) {
+        $isImgFile = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION)) === 'img';
+        if (!$missingHashes && !$sizeChanged && !$isImgFile) {
             $stats['skipped']++;
             hash_log('File: ' . $relativePath . ' | stage=skip | reason=already_fresh');
             continue;
