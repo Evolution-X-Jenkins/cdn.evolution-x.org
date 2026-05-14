@@ -24,6 +24,8 @@
     <title><?php echo isset($page_title) ? htmlspecialchars($page_title) : 'Evolution X - Download Server'; ?></title>
     <link rel="stylesheet" href="static/tailwind.css">
     <script defer src="static/alpine.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,300..800;1,300..800&display=swap" rel="stylesheet">
