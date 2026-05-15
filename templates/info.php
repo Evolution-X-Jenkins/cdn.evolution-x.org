@@ -97,15 +97,6 @@ ob_start();
                     </svg>
                     File Hashes
                 </h3>
-                <?php if (empty($hashes) && !$hashes_calculating): ?>
-                <button onclick="calculateHashes()" class="px-3 py-1 bg-[#0060ff] text-white text-sm rounded hover:bg-[#004bb5] transition-colors">
-                    Calculate Hashes
-                </button>
-                <?php elseif ($hashes_calculating): ?>
-                <span class="px-3 py-1 bg-yellow-600 text-white text-sm rounded">
-                    Calculating...
-                </span>
-                <?php endif; ?>
             </div>
             
             <div class="space-y-4">
