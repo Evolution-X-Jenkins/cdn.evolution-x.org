@@ -47,12 +47,12 @@ function show_info_page($relative_file_path, $full_file_path) {
     $chart_data = [];
     $daily_downloads = [];
     $cache = CacheManager::getInstance();
-    $cache_key = 'stats:' . basename($relative_file_path);
+    $cache_key = 'stats7d:' . ltrim($relative_file_path, '/');
     
     // Try cache first
     $cached_data = $cache->get($cache_key);
     
-    if ($cached_data) {
+    if ($cached_data !== null) {
         // Use cached daily breakdown
         foreach ($cached_data as $date => $count) {
             $chart_data[$date] = (int)$count;
@@ -74,6 +74,9 @@ function show_info_page($relative_file_path, $full_file_path) {
                 $chart_data[$day['download_date']] = (int)$day['downloads'];
             }
         }
+
+        // Cache per-file 7-day series to avoid repeated aggregate queries.
+        $cache->set($cache_key, $chart_data, DOWNLOAD_STATS_CACHE_TTL);
     }
     
     // Ensure we have all 7 days even if cache was partial

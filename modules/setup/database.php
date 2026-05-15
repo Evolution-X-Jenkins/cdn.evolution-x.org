@@ -171,6 +171,7 @@ class Database {
         $this->pdo->exec($sql);
         $this->migratePushReleaseQueueSchema();
         $this->migratePushReleaseQueueUniqueness();
+        $this->migrateDownloadStatsIndexes();
         
     }
 
@@ -210,6 +211,35 @@ class Database {
             $this->pdo->exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_push_release_queue_source_path ON push_release_queue(source_path)");
         } catch (Exception $e) {
             error_log('Push queue uniqueness migration skipped: ' . $e->getMessage());
+        }
+    }
+
+    private function migrateDownloadStatsIndexes() {
+        try {
+            if (!defined('DB_TYPE') || DB_TYPE !== 'mysql') {
+                return;
+            }
+
+            $tableStmt = $this->pdo->query("SELECT COUNT(1) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'download_stats'");
+            if ((int)$tableStmt->fetchColumn() === 0) {
+                return;
+            }
+
+            $indexes = [
+                'idx_download_stats_filename_folder_time' => 'CREATE INDEX idx_download_stats_filename_folder_time ON download_stats (filename, folder, download_time)',
+                'idx_download_stats_download_time' => 'CREATE INDEX idx_download_stats_download_time ON download_stats (download_time)',
+                'idx_download_stats_folder_download_time' => 'CREATE INDEX idx_download_stats_folder_download_time ON download_stats (folder, download_time)',
+            ];
+
+            foreach ($indexes as $name => $sql) {
+                $idxStmt = $this->pdo->prepare("SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'download_stats' AND INDEX_NAME = ?");
+                $idxStmt->execute([$name]);
+                if ((int)$idxStmt->fetchColumn() === 0) {
+                    $this->pdo->exec($sql);
+                }
+            }
+        } catch (Exception $e) {
+            error_log('download_stats index migration skipped: ' . $e->getMessage());
         }
     }
     
