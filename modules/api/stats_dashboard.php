@@ -6,6 +6,7 @@
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
+require_once __DIR__ . '/../core/cache.php';
 require_once __DIR__ . '/../core/device_names.php';
 
 function handleStatsDashboardApi($method, $pathParts) {
@@ -19,6 +20,7 @@ function handleStatsDashboardApi($method, $pathParts) {
     try {
         $db = Database::getInstance();
         $pdo = $db->getConnection();
+        $cache = CacheManager::getInstance();
 
         $breakdownTimeframeInput = strtolower(trim((string)($_GET['breakdownTimeframe'] ?? '7d')));
         $devicesTimeframeInput = strtolower(trim((string)($_GET['devicesTimeframe'] ?? '7d')));
@@ -49,9 +51,20 @@ function handleStatsDashboardApi($method, $pathParts) {
 
         $topLimit = isset($_GET['topLimit']) ? (int)$_GET['topLimit'] : 25;
         $topLimit = max(1, min($topLimit, 100));
+        $cacheKey = 'stats_dashboard:' . hash('sha256', json_encode([
+            'breakdown' => $breakdownTimeframe,
+            'devices' => $devicesTimeframe,
+            'device' => $selectedDevice,
+            'topLimit' => $topLimit,
+        ]));
+
+        $cachedResponse = $cache->get($cacheKey);
+        if ($cachedResponse !== null) {
+            return $cachedResponse;
+        }
 
         if (!statsTableExists($pdo, 'download_stats')) {
-            return [
+            $response = [
                 'success' => true,
                 'has_data' => false,
                 'table_available' => false,
@@ -82,6 +95,8 @@ function handleStatsDashboardApi($method, $pathParts) {
                     'exists' => false
                 ]
             ];
+            $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+            return $response;
         }
 
         $summary = buildTotalSummary($pdo);
@@ -89,7 +104,7 @@ function handleStatsDashboardApi($method, $pathParts) {
         $devicesAvailable = buildAvailableDevices($pdo);
         $topDevices = buildTopDevices($pdo, $devicesTimeframe, $selectedDevice, $topLimit);
 
-        return [
+        $response = [
             'success' => true,
             'has_data' => $summary['total_downloads'] > 0,
             'table_available' => true,
@@ -116,6 +131,8 @@ function handleStatsDashboardApi($method, $pathParts) {
                 'exists' => $topDevices['selected_device_exists']
             ]
         ];
+        $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+        return $response;
     } catch (Exception $e) {
         error_log('Stats Dashboard API Error: ' . $e->getMessage());
         return [

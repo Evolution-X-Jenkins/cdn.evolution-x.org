@@ -6,6 +6,7 @@
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
+require_once __DIR__ . '/../core/cache.php';
 
 function handleDailyDownloadsApi($method, $pathParts) {
     if ($method !== 'GET') {
@@ -17,6 +18,7 @@ function handleDailyDownloadsApi($method, $pathParts) {
     
     try {
         $db = Database::getInstance();
+        $cache = CacheManager::getInstance();
         
         // Get yesterday's date (or specific date if provided)
         $targetDate = isset($pathParts[0]) ? $pathParts[0] : date('Y-m-d', strtotime('-1 day'));
@@ -27,6 +29,12 @@ function handleDailyDownloadsApi($method, $pathParts) {
                 'error' => 'Invalid date format. Use YYYY-MM-DD',
                 'provided_date' => $targetDate
             ];
+        }
+
+        $cacheKey = 'daily_downloads:' . $targetDate;
+        $cachedResponse = $cache->get($cacheKey);
+        if ($cachedResponse !== null) {
+            return $cachedResponse;
         }
         
         // Query download statistics for the specific date
@@ -73,7 +81,7 @@ function handleDailyDownloadsApi($method, $pathParts) {
         $stmt->execute([$targetDate]);
         $summary = $stmt->fetch(PDO::FETCH_ASSOC);
         
-        return [
+        $response = [
             'fordate' => $targetDate,
             'summary' => [
                 'total_downloads' => $total_downloads,
@@ -82,6 +90,8 @@ function handleDailyDownloadsApi($method, $pathParts) {
             ],
             'individual_files' => $individual_files
         ];
+        $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+        return $response;
         
     } catch (Exception $e) {
         error_log('Daily Downloads API Error: ' . $e->getMessage());
@@ -102,10 +112,17 @@ function handleDailyDownloadsSummaryApi($method, $pathParts) {
     
     try {
         $db = Database::getInstance();
+        $cache = CacheManager::getInstance();
         
         // Get last 7 days of download summaries
         $days = isset($pathParts[0]) && is_numeric($pathParts[0]) ? (int)$pathParts[0] : 7;
         $days = max(1, min($days, 30)); // Limit between 1 and 30 days
+
+        $cacheKey = 'daily_downloads_summary:' . $days;
+        $cachedResponse = $cache->get($cacheKey);
+        if ($cachedResponse !== null) {
+            return $cachedResponse;
+        }
         
         $stmt = $db->getConnection()->prepare('
             SELECT 
@@ -134,10 +151,12 @@ function handleDailyDownloadsSummaryApi($method, $pathParts) {
             ];
         }
         
-        return [
+        $response = [
             'period' => $days . ' days',
             'daily_summary' => $daily_summary
         ];
+        $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+        return $response;
         
     } catch (Exception $e) {
         error_log('Daily Downloads Summary API Error: ' . $e->getMessage());

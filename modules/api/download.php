@@ -5,6 +5,7 @@
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
+require_once __DIR__ . '/../core/cache.php';
 
 function handleDownloadStatsApi($method, $pathParts) {
     $db = Database::getInstance();
@@ -58,6 +59,21 @@ function handleDownloadStatisticsApi($method, $pathParts) {
     $limit = min((int)($_GET['limit'] ?? 50), 1000);
     $sortBy = $_GET['sort'] ?? 'downloads';
     $format = $_GET['format'] ?? 'summary';
+    $cache = CacheManager::getInstance();
+    $cacheKey = 'download_stats_api:' . hash('sha256', json_encode([
+        'filename' => $filenameFilter,
+        'folder' => $folderFilter,
+        'timeStart' => $timeStart,
+        'timeEnd' => $timeEnd,
+        'limit' => $limit,
+        'sort' => $sortBy,
+        'format' => $format,
+    ]));
+
+    $cachedResponse = $cache->get($cacheKey);
+    if ($cachedResponse !== null) {
+        return $cachedResponse;
+    }
     
     // Parse and validate date parameters
     $startDate = null;
@@ -110,7 +126,7 @@ function handleDownloadStatisticsApi($method, $pathParts) {
             $oldestDate = $oldestDownload ? date('Y-m-d', strtotime($oldestDownload)) : null;
             $todayDate = date('Y-m-d');
             
-            return [[
+            $response = [[
                 'folder' => 'ALL_DOWNLOADS',
                 'downloadCount' => (int)$totalDownloads,
                 'timeStart' => $oldestDate,
@@ -120,6 +136,8 @@ function handleDownloadStatisticsApi($method, $pathParts) {
                     'downloadCount' => (int)$totalDownloads
                 ]]
             ]];
+            $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+            return $response;
         } catch (Exception $e) {
             error_log("Download statistics error: " . $e->getMessage());
             return [
@@ -143,7 +161,7 @@ function handleDownloadStatisticsApi($method, $pathParts) {
                 $stmt->execute(['%' . $filenameFilter . '%']);
                 $totalCount = $stmt->fetchColumn() ?: 0;
                 
-                return [[
+                $response = [[
                     'folder' => 'FILENAME_FILTER_' . strtoupper($filenameFilter),
                     'downloadCount' => (int)$totalCount,
                     'timeStart' => null,
@@ -153,6 +171,8 @@ function handleDownloadStatisticsApi($method, $pathParts) {
                         'downloadCount' => (int)$totalCount
                     ]]
                 ]];
+                $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+                return $response;
             } elseif ($folderFilter && !$filenameFilter) {
                 // Get total for specific folder
                 $stmt = $db->getConnection()->prepare('
@@ -163,7 +183,7 @@ function handleDownloadStatisticsApi($method, $pathParts) {
                 $stmt->execute([$folderFilter . '/%']);
                 $totalCount = $stmt->fetchColumn() ?: 0;
                 
-                return [[
+                $response = [[
                     'folder' => $folderFilter,
                     'downloadCount' => (int)$totalCount,
                     'timeStart' => null,
@@ -173,6 +193,8 @@ function handleDownloadStatisticsApi($method, $pathParts) {
                         'downloadCount' => (int)$totalCount
                     ]]
                 ]];
+                $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+                return $response;
             }
         } catch (Exception $e) {
             error_log("Download statistics error: " . $e->getMessage());
@@ -209,7 +231,7 @@ function handleDownloadStatisticsApi($method, $pathParts) {
             $stmt->execute($params);
             $totalCount = $stmt->fetchColumn() ?: 0;
             
-            return [[
+            $response = [[
                 'folder' => 'TIME_RANGE_FILTER',
                 'downloadCount' => (int)$totalCount,
                 'timeStart' => $startDate ? $startDate->format('Y-m-d') : null,
@@ -219,6 +241,8 @@ function handleDownloadStatisticsApi($method, $pathParts) {
                     'downloadCount' => (int)$totalCount
                 ]]
             ]];
+            $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+            return $response;
         } catch (Exception $e) {
             error_log("Download statistics error: " . $e->getMessage());
             return [
@@ -298,7 +322,9 @@ function handleDownloadStatisticsApi($method, $pathParts) {
             $folderGroups[$folder]['downloadCount'] += (int)$row['download_count'];
         }
         
-        return array_values($folderGroups);
+        $response = array_values($folderGroups);
+        $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+        return $response;
         
     } catch (Exception $e) {
         error_log("Download statistics error: " . $e->getMessage());
