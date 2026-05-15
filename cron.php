@@ -225,6 +225,124 @@ try {
     log_message("WARNING: Download total verification failed: " . $e->getMessage());
 }
 
+// 3.6 Build stats dashboard snapshot (JSON only, consumed by /api/stats-dashboard)
+log_message("Building stats dashboard snapshot...");
+try {
+    $db = Database::getInstance();
+    $pdo = $db->getConnection();
+
+    $dashboardCacheFile = defined('STATS_DASHBOARD_CACHE_FILE')
+        ? STATS_DASHBOARD_CACHE_FILE
+        : ($statsDir . '/stats_dashboard.json');
+    $dashboardTmpFile = $dashboardCacheFile . '.tmp';
+
+    if (!tableExists($pdo, 'download_stats')) {
+        $emptySnapshot = [
+            'generated_at' => date('c'),
+            'summary' => [
+                'total_downloads' => 0,
+                'since_date' => null,
+            ],
+            'daily_totals' => [],
+            'device_daily' => [],
+            'device_totals_all' => [],
+            'devices_available' => [],
+        ];
+
+        if (file_put_contents($dashboardTmpFile, json_encode($emptySnapshot, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX)) {
+            rename($dashboardTmpFile, $dashboardCacheFile);
+            log_message("Stats dashboard snapshot updated (empty): " . $dashboardCacheFile);
+        }
+
+        log_message("download_stats table not available; using empty dashboard snapshot");
+    } else {
+        $dateExpr = (defined('DB_TYPE') && DB_TYPE === 'mysql')
+            ? "DATE_FORMAT(download_time, '%Y-%m-%d')"
+            : "DATE(download_time)";
+
+        $summaryStmt = $pdo->query('SELECT COUNT(*) as total_downloads, MIN(download_time) as oldest_download FROM download_stats');
+        $summaryRow = $summaryStmt->fetch();
+
+        $totalDownloads = (int)($summaryRow['total_downloads'] ?? 0);
+        $oldestRaw = $summaryRow['oldest_download'] ?? null;
+        $sinceDate = $oldestRaw ? date('Y-m-d', strtotime((string)$oldestRaw)) : null;
+
+        $dailyStmt = $pdo->prepare('SELECT ' . $dateExpr . ' as download_date, COUNT(*) as downloads FROM download_stats GROUP BY ' . $dateExpr . ' ORDER BY download_date ASC');
+        $dailyStmt->execute();
+        $dailyRows = $dailyStmt->fetchAll();
+
+        $dailyTotals = [];
+        foreach ($dailyRows as $row) {
+            $date = (string)($row['download_date'] ?? '');
+            if ($date === '') {
+                continue;
+            }
+            $dailyTotals[$date] = (int)$row['downloads'];
+        }
+
+        $deviceStmt = $pdo->prepare('SELECT folder, ' . $dateExpr . ' as download_date, COUNT(*) as downloads FROM download_stats GROUP BY folder, ' . $dateExpr . ' ORDER BY download_date ASC');
+        $deviceStmt->execute();
+        $deviceRows = $deviceStmt->fetchAll();
+
+        $deviceDaily = [];
+        $deviceAll = [];
+        foreach ($deviceRows as $row) {
+            $folder = (string)($row['folder'] ?? '');
+            $date = (string)($row['download_date'] ?? '');
+            $count = (int)$row['downloads'];
+
+            $device = extractDeviceCodeFromFolder($folder);
+            if (!isset($deviceDaily[$device])) {
+                $deviceDaily[$device] = [];
+            }
+            if (!isset($deviceDaily[$device][$date])) {
+                $deviceDaily[$device][$date] = 0;
+            }
+            $deviceDaily[$device][$date] += $count;
+
+            if (!isset($deviceAll[$device])) {
+                $deviceAll[$device] = 0;
+            }
+            $deviceAll[$device] += $count;
+        }
+
+        ksort($dailyTotals);
+        foreach ($deviceDaily as $device => $map) {
+            ksort($map);
+            $deviceDaily[$device] = $map;
+        }
+
+        $devicesAvailable = array_values(array_filter(array_keys($deviceAll), function ($device) {
+            return $device !== 'root';
+        }));
+        sort($devicesAvailable, SORT_NATURAL | SORT_FLAG_CASE);
+
+        $dashboardSnapshot = [
+            'generated_at' => date('c'),
+            'summary' => [
+                'total_downloads' => $totalDownloads,
+                'since_date' => $sinceDate,
+            ],
+            'daily_totals' => $dailyTotals,
+            'device_daily' => $deviceDaily,
+            'device_totals_all' => $deviceAll,
+            'devices_available' => $devicesAvailable,
+        ];
+
+        if (file_put_contents($dashboardTmpFile, json_encode($dashboardSnapshot, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX)) {
+            rename($dashboardTmpFile, $dashboardCacheFile);
+            log_message("Stats dashboard snapshot updated: " . $dashboardCacheFile);
+        } else {
+            log_message("WARNING: Failed writing stats dashboard snapshot");
+            if (file_exists($dashboardTmpFile)) {
+                unlink($dashboardTmpFile);
+            }
+        }
+    }
+} catch (Exception $e) {
+    log_message("WARNING: Stats dashboard snapshot build failed: " . $e->getMessage());
+}
+
 // 4. Clean up old JSON cache files and stale database entries
 log_message("Cleaning cache...");
 try {
@@ -301,5 +419,16 @@ function tableExists($pdo, $tableName) {
     $stmt = $pdo->prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1");
     $stmt->execute([$tableName]);
     return (bool)$stmt->fetchColumn();
+}
+
+function extractDeviceCodeFromFolder($folder) {
+    $cleanFolder = trim((string)$folder, '/');
+    if ($cleanFolder === '') {
+        return 'root';
+    }
+
+    $parts = explode('/', $cleanFolder);
+    $device = trim((string)$parts[0]);
+    return $device === '' ? 'root' : $device;
 }
 ?>

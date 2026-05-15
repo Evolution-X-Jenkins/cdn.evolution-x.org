@@ -63,6 +63,13 @@ function handleStatsDashboardApi($method, $pathParts) {
             return $cachedResponse;
         }
 
+        $snapshot = loadStatsDashboardSnapshot();
+        if ($snapshot !== null) {
+            $response = buildStatsResponseFromSnapshot($snapshot, $breakdownTimeframe, $devicesTimeframe, $selectedDevice, $topLimit);
+            $cache->set($cacheKey, $response, DOWNLOAD_STATS_CACHE_TTL);
+            return $response;
+        }
+
         if (!statsTableExists($pdo, 'download_stats')) {
             $response = [
                 'success' => true,
@@ -448,6 +455,189 @@ function buildTopDevices($pdo, $timeframe, $selectedDevice, $limit) {
         'top_device' => $topDevice,
         'selected_device_downloads' => $selectedDownloads,
         'selected_device_exists' => $selectedExists
+    ];
+}
+
+function loadStatsDashboardSnapshot() {
+    $cacheFile = defined('STATS_DASHBOARD_CACHE_FILE') ? STATS_DASHBOARD_CACHE_FILE : null;
+    if (!$cacheFile || !is_readable($cacheFile)) {
+        return null;
+    }
+
+    $json = @file_get_contents($cacheFile);
+    if ($json === false || $json === '') {
+        return null;
+    }
+
+    $decoded = json_decode($json, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+
+    return $decoded;
+}
+
+function buildStatsResponseFromSnapshot($snapshot, $breakdownTimeframe, $devicesTimeframe, $selectedDevice, $topLimit) {
+    $summary = [
+        'total_downloads' => (int)($snapshot['summary']['total_downloads'] ?? 0),
+        'since_date' => $snapshot['summary']['since_date'] ?? null,
+    ];
+
+    $dailyTotals = is_array($snapshot['daily_totals'] ?? null) ? $snapshot['daily_totals'] : [];
+    $deviceDaily = is_array($snapshot['device_daily'] ?? null) ? $snapshot['device_daily'] : [];
+    $devicesAvailable = is_array($snapshot['devices_available'] ?? null) ? $snapshot['devices_available'] : [];
+
+    $breakdownSeries = buildBreakdownSeriesFromDailyMap($dailyTotals, $breakdownTimeframe);
+    $topDevices = buildTopDevicesFromSnapshot($deviceDaily, $devicesTimeframe, $selectedDevice, $topLimit);
+
+    return [
+        'success' => true,
+        'has_data' => $summary['total_downloads'] > 0,
+        'table_available' => true,
+        'cache_source' => 'cron_json',
+        'cache_generated_at' => $snapshot['generated_at'] ?? null,
+        'filters' => [
+            'breakdown_timeframe' => $breakdownTimeframe,
+            'devices_timeframe' => $devicesTimeframe,
+            'device' => $selectedDevice === '' ? 'all' : $selectedDevice,
+            'top_limit' => $topLimit
+        ],
+        'summary' => $summary,
+        'download_breakdown' => [
+            'timeframe' => $breakdownTimeframe,
+            'series' => $breakdownSeries
+        ],
+        'top_devices' => [
+            'timeframe' => $devicesTimeframe,
+            'rows' => $topDevices['rows'],
+            'top_device' => $topDevices['top_device']
+        ],
+        'devices_available' => $devicesAvailable,
+        'selected_device' => [
+            'device' => $selectedDevice === '' ? 'all' : $selectedDevice,
+            'downloads' => $topDevices['selected_device_downloads'],
+            'exists' => $topDevices['selected_device_exists']
+        ]
+    ];
+}
+
+function buildBreakdownSeriesFromDailyMap($dailyMap, $timeframe) {
+    if (!is_array($dailyMap)) {
+        $dailyMap = [];
+    }
+
+    if ($timeframe === 'all') {
+        $byMonth = [];
+        foreach ($dailyMap as $date => $count) {
+            $month = substr((string)$date, 0, 7);
+            if (!isset($byMonth[$month])) {
+                $byMonth[$month] = 0;
+            }
+            $byMonth[$month] += (int)$count;
+        }
+        ksort($byMonth);
+
+        $series = [];
+        foreach ($byMonth as $month => $downloads) {
+            $dateObj = DateTime::createFromFormat('Y-m', $month);
+            $label = $dateObj ? $dateObj->format('M Y') : $month;
+            $series[] = [
+                'date' => $month . '-01',
+                'day' => $dateObj ? $dateObj->format('M') : $month,
+                'label' => $label,
+                'downloads' => (int)$downloads,
+            ];
+        }
+
+        return $series;
+    }
+
+    $fixedDays = ($timeframe === 'today') ? 1 : (($timeframe === '7d') ? 7 : 30);
+    $series = [];
+    for ($i = $fixedDays - 1; $i >= 0; $i--) {
+        $dateObj = new DateTime('today');
+        $dateObj->modify('-' . $i . ' days');
+        $date = $dateObj->format('Y-m-d');
+        $series[] = [
+            'date' => $date,
+            'day' => $dateObj->format('D'),
+            'downloads' => (int)($dailyMap[$date] ?? 0),
+        ];
+    }
+
+    return $series;
+}
+
+function buildTopDevicesFromSnapshot($deviceDaily, $timeframe, $selectedDevice, $limit) {
+    $startDate = null;
+    if ($timeframe === 'today') {
+        $startDate = (new DateTime('today'))->format('Y-m-d');
+    } elseif ($timeframe === '7d') {
+        $startDate = (new DateTime('today'))->modify('-6 days')->format('Y-m-d');
+    } elseif ($timeframe === '30d') {
+        $startDate = (new DateTime('today'))->modify('-29 days')->format('Y-m-d');
+    }
+
+    $deviceCounts = [];
+    foreach ($deviceDaily as $device => $dailyMap) {
+        if (!is_array($dailyMap)) {
+            continue;
+        }
+
+        if ($selectedDevice !== '' && $device !== $selectedDevice) {
+            continue;
+        }
+
+        $total = 0;
+        foreach ($dailyMap as $date => $count) {
+            if ($startDate !== null && (string)$date < $startDate) {
+                continue;
+            }
+            $total += (int)$count;
+        }
+
+        if ($total > 0 || $selectedDevice === $device) {
+            $deviceCounts[$device] = $total;
+        }
+    }
+
+    $resolvedNames = resolveDeviceNames(array_keys($deviceCounts));
+    $rows = [];
+    foreach ($deviceCounts as $device => $downloads) {
+        $rows[] = [
+            'device' => $device,
+            'display_name' => formatDeviceDisplayName($device, $resolvedNames[$device] ?? null),
+            'downloads' => (int)$downloads,
+        ];
+    }
+
+    usort($rows, function ($a, $b) {
+        if ($a['downloads'] === $b['downloads']) {
+            return strcasecmp($a['display_name'], $b['display_name']);
+        }
+        return $b['downloads'] <=> $a['downloads'];
+    });
+
+    $rowsLimited = array_slice($rows, 0, $limit);
+    $topDevice = $rowsLimited[0] ?? null;
+
+    $selectedDownloads = 0;
+    $selectedExists = false;
+    if ($selectedDevice !== '') {
+        foreach ($rows as $row) {
+            if ($row['device'] === $selectedDevice) {
+                $selectedDownloads = (int)$row['downloads'];
+                $selectedExists = true;
+                break;
+            }
+        }
+    }
+
+    return [
+        'rows' => $rowsLimited,
+        'top_device' => $topDevice,
+        'selected_device_downloads' => $selectedDownloads,
+        'selected_device_exists' => $selectedExists,
     ];
 }
 
