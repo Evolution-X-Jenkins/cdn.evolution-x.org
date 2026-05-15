@@ -45,7 +45,11 @@ class CacheManager {
             }
             
             $this->redis = new Redis();
-            $this->redis->connect(CACHE_REDIS_HOST, CACHE_REDIS_PORT, 1); // 1 second timeout
+            if (defined('CACHE_REDIS_SOCKET') && CACHE_REDIS_SOCKET) {
+                $this->redis->connect(CACHE_REDIS_SOCKET); // Unix socket
+            } else {
+                $this->redis->connect(CACHE_REDIS_HOST, CACHE_REDIS_PORT, 1); // TCP, 1 second timeout
+            }
             
             if (CACHE_REDIS_PASSWORD) {
                 $this->redis->auth(CACHE_REDIS_PASSWORD);
@@ -112,14 +116,21 @@ class CacheManager {
     
     /**
      * Set value in cache (writes to: Redis + File + APCu)
+     * @param string $key
+     * @param mixed  $value
+     * @param int    $ttl  Seconds until expiry; 0 = no expiry
      */
-    public function set($key, $value) {
+    public function set($key, $value, $ttl = 0) {
         $json_value = json_encode($value, JSON_UNESCAPED_SLASHES);
         
         // Write to Redis
         if ($this->redis_available) {
             try {
-                $this->redis->set($key, $json_value);
+                if ($ttl > 0) {
+                    $this->redis->setex($key, $ttl, $json_value);
+                } else {
+                    $this->redis->set($key, $json_value);
+                }
             } catch (Exception $e) {
                 error_log('Failed to write to Redis: ' . $e->getMessage());
             }

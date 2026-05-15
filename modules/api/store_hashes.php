@@ -104,6 +104,10 @@ function handleStoreHashesApi($method, $pathParts) {
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$normalizedPath, $currentCount, $md5, $sha256, $fileSize]);
         
+        // Invalidate Redis hash cache so info page picks up fresh values
+        require_once __DIR__ . '/../core/cache.php';
+        CacheManager::getInstance()->delete('hash:' . $normalizedPath);
+        
         $log("SUCCESS: Data inserted/updated");
         
         return [

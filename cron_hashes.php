@@ -163,6 +163,8 @@ $startTime = microtime(true);
 try {
     hash_log('Stage: database setup');
     $pdo = Database::getInstance()->getConnection();
+    require_once __DIR__ . '/modules/core/cache.php';
+    $hashCache = CacheManager::getInstance();
     ensure_download_stat_table($pdo);
 
     $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
@@ -304,7 +306,8 @@ try {
 
         hash_log('File: ' . $relativePath . ' | stage=upsert');
         $upsertStmt->execute([$relativePath, $storedCount, $md5, $sha256, $actualSize]);
-        $stats['hashed']++;
+        $hashCache->delete('hash:' . $relativePath);
+        $stats['hashed']++;;
         hash_log('File: ' . $relativePath . ' | stage=done | action=updated');
 
         if ($stats['scanned'] % 50 === 0) {

@@ -31,9 +31,17 @@ function show_info_page($relative_file_path, $full_file_path) {
     $file_extension = strtolower(pathinfo($file_name, PATHINFO_EXTENSION));
     $file_type = get_file_type($file_extension);
     
-    // Get all-time total downloads
-    $total_downloads_stats = $db->getDownloadStats($relative_file_path); // All time
-    $total_downloads = $total_downloads_stats['total_downloads'] ?? 0;
+    // Get all-time total downloads (cached 5 min)
+    $cache_dl_key = 'dlcount:' . ltrim($relative_file_path, '/');
+    $cache_for_info = CacheManager::getInstance();
+    $cached_dl = $cache_for_info->get($cache_dl_key);
+    if ($cached_dl !== null) {
+        $total_downloads = (int)$cached_dl;
+    } else {
+        $total_downloads_stats = $db->getDownloadStats($relative_file_path);
+        $total_downloads = $total_downloads_stats['total_downloads'] ?? 0;
+        $cache_for_info->set($cache_dl_key, $total_downloads, 300);
+    }
     
     // Try to load 7-day breakdown from cache (Redis → File → DB query)
     $chart_data = [];
@@ -96,22 +104,29 @@ function show_info_page($relative_file_path, $full_file_path) {
     try {
         // Normalize path for database lookup (remove leading slash)
         $db_path = ltrim($relative_file_path, '/');
-        
-        // Get hashes from download_stat table
-        $stmt = $db->getConnection()->prepare('SELECT md5, sha256, file_size FROM download_stat WHERE `key` = ?');
-        $stmt->execute([$db_path]);
-        $stat_data = $stmt->fetch();
-        
-        if ($stat_data && !empty($stat_data['md5']) && !empty($stat_data['sha256'])) {
-            // We have hashes cached in database
-            $md5_hash = $stat_data['md5'];
-            $sha256_hash = $stat_data['sha256'];
-            $hashes = array_filter([
-                'md5' => $md5_hash,
-                'sha256' => $sha256_hash
-            ]);
+        $hash_cache_key = 'hash:' . $db_path;
+        $hash_cache = CacheManager::getInstance();
+        $cached_hashes = $hash_cache->get($hash_cache_key);
+
+        if ($cached_hashes !== null) {
+            $md5_hash    = $cached_hashes['md5']    ?? '';
+            $sha256_hash = $cached_hashes['sha256'] ?? '';
+            $hashes = array_filter(['md5' => $md5_hash, 'sha256' => $sha256_hash]);
+        } else {
+            // Get hashes from download_stat table
+            $stmt = $db->getConnection()->prepare('SELECT md5, sha256, file_size FROM download_stat WHERE `key` = ?');
+            $stmt->execute([$db_path]);
+            $stat_data = $stmt->fetch();
+
+            if ($stat_data && !empty($stat_data['md5']) && !empty($stat_data['sha256'])) {
+                $md5_hash    = $stat_data['md5'];
+                $sha256_hash = $stat_data['sha256'];
+                $hashes = array_filter(['md5' => $md5_hash, 'sha256' => $sha256_hash]);
+                // Cache for 24 hours — hashes rarely change
+                $hash_cache->set($hash_cache_key, ['md5' => $md5_hash, 'sha256' => $sha256_hash], 86400);
+            }
+            // If no hashes found, JavaScript will attempt to load from OTA
         }
-        // If no hashes found, JavaScript will attempt to load from OTA
     } catch (Exception $e) {
         error_log('Failed to get file hashes: ' . $e->getMessage());
     }
