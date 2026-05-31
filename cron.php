@@ -47,18 +47,18 @@ function log_message($message) {
 log_message("Starting cron job");
 
 // 1. Update bucket cache
-echo "[" . date('Y-m-d H:i:s') . "] Checking bucket cache...\n";
+log_message("Checking bucket cache...");
 try {
     $cache = new BucketCache();
     $result = $cache->updateCacheInBackground();
     
     if ($result) {
-        echo "[" . date('Y-m-d H:i:s') . "] Bucket cache updated successfully\n";
+        log_message("Bucket cache updated successfully");
     } else {
-        echo "[" . date('Y-m-d H:i:s') . "] Bucket cache update skipped (no changes detected or already running)\n";
+        log_message("Bucket cache update skipped (no changes detected or already running)");
     }
 } catch (Exception $e) {
-    echo "[" . date('Y-m-d H:i:s') . "] ERROR: Bucket cache update failed: " . $e->getMessage() . "\n";
+    log_message("ERROR: Bucket cache update failed: " . $e->getMessage());
 }
 
 // 2. Clean up old database entries
@@ -82,60 +82,47 @@ log_message("Building 7-day download stats cache for all files...");
 try {
     $db = Database::getInstance();
     $cache = CacheManager::getInstance();
-    
-    // Get ALL files with downloads (not just top 50)
-    $stmt = $db->getConnection()->prepare('
-        SELECT DISTINCT filename 
-        FROM download_stats 
-        ORDER BY filename ASC
+
+    if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+        $dateFormat = "DATE_FORMAT(download_time, '%Y-%m-%d')";
+        $recentWindow = 'download_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
+    } else {
+        $dateFormat = "DATE(download_time)";
+        $recentWindow = "download_time >= datetime('now', '-7 day')";
+    }
+
+    $statsStmt = $db->getConnection()->prepare('
+        SELECT filename, ' . $dateFormat . ' as download_date, COUNT(*) as downloads
+        FROM download_stats
+        WHERE ' . $recentWindow . '
+        GROUP BY filename, ' . $dateFormat . '
+        ORDER BY filename ASC, download_date DESC
     ');
-    $stmt->execute();
-    $all_files = array_column($stmt->fetchAll(), 'filename');
-    
+    $statsStmt->execute();
+    $dailyRows = $statsStmt->fetchAll();
+
     $stats_cache = []; // For JSON file
-    $cached_count = 0;
-    $total_files = count($all_files);
-    
-    log_message("Processing $total_files files with download history...");
-    
-    foreach ($all_files as $filename) {
-        try {
-            // Get daily breakdown for the last 7 days
-            if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
-                $dateFormat = "DATE_FORMAT(download_time, '%Y-%m-%d')";
-            } else {
-                $dateFormat = "DATE(download_time)";
-            }
-            
-            $stmt = $db->getConnection()->prepare('
-                SELECT ' . $dateFormat . ' as download_date, COUNT(*) as downloads
-                FROM download_stats 
-                WHERE filename = ? 
-                AND download_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-                GROUP BY ' . $dateFormat . '
-                ORDER BY download_date DESC
-            ');
-            $stmt->execute([$filename]);
-            $daily_stats = $stmt->fetchAll();
-            
-            // Build daily breakdown (newest first)
-            $daily_breakdown = [];
-            foreach ($daily_stats as $day) {
-                $daily_breakdown[$day['download_date']] = (int)$day['downloads'];
-            }
-            
-            if (!empty($daily_breakdown)) {
-                $stats_cache[$filename] = $daily_breakdown;
-                
-                // Cache to Redis + File via CacheManager (no TTL)
-                $cache_key = 'stats:' . $filename;
-                $cache->set($cache_key, $daily_breakdown);
-                
-                $cached_count++;
-            }
-        } catch (Exception $e) {
-            log_message("WARNING: Failed to cache stats for $filename: " . $e->getMessage());
+    foreach ($dailyRows as $row) {
+        $filename = (string)($row['filename'] ?? '');
+        $downloadDate = (string)($row['download_date'] ?? '');
+
+        if ($filename === '' || $downloadDate === '') {
+            continue;
         }
+
+        if (!isset($stats_cache[$filename])) {
+            $stats_cache[$filename] = [];
+        }
+
+        $stats_cache[$filename][$downloadDate] = (int)$row['downloads'];
+    }
+
+    $cached_count = count($stats_cache);
+    log_message("Processing $cached_count files with downloads in the last 7 days...");
+
+    foreach ($stats_cache as $filename => $daily_breakdown) {
+        $cache_key = 'stats:' . $filename;
+        $cache->set($cache_key, $daily_breakdown);
     }
     
     // Write to JSON file atomically (for backward compatibility and persistence)
@@ -159,68 +146,51 @@ try {
 log_message("Verifying file download totals...");
 try {
     $db = Database::getInstance();
-    
-    // Get all files from download_stat
-    $stmt = $db->getConnection()->prepare('SELECT * FROM download_stat');
-    $stmt->execute();
-    $files = $stmt->fetchAll();
-    
+    $pdo = $db->getConnection();
+    $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
+
+    // Single query: aggregate actual counts for every filename+folder combination
+    $actualStmt = $pdo->query('
+        SELECT CONCAT(CASE WHEN folder = \'\' THEN \'\' ELSE CONCAT(folder, \'/\') END, filename) AS file_key,
+               COUNT(*) AS actual_count
+        FROM download_stats
+        GROUP BY folder, filename
+    ');
+    $actualCounts = [];
+    foreach ($actualStmt->fetchAll() as $row) {
+        $actualCounts[$row['file_key']] = (int)$row['actual_count'];
+    }
+
+    // Load all stored counts in one query
+    $storedStmt = $pdo->query('SELECT ' . $keyColumn . ' AS file_key, count FROM download_stat');
+    $storedFiles = $storedStmt->fetchAll();
+
     $verified_count = 0;
     $corrected_count = 0;
     $errors = [];
-    
-    // Determine correct column name for this database type
-    $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
-    
-    foreach ($files as $file) {
-        try {
-            $fileKey = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? $file['key'] : $file['key_path'];
-            
-            // Parse the full path to extract filename and folder
-            $pathParts = explode('/', trim($fileKey, '/'));
-            $filename = end($pathParts);
-            $folder = count($pathParts) > 1 ? implode('/', array_slice($pathParts, 0, -1)) : '';
-            
-            // Count actual downloads from download_stats (matches on both filename AND folder)
-            $countStmt = $db->getConnection()->prepare('
-                SELECT COUNT(*) as total 
-                FROM download_stats 
-                WHERE filename = ? AND folder = ?
-            ');
-            $countStmt->execute([$filename, $folder]);
-            $result = $countStmt->fetch();
-            $actual_count = (int)$result['total'];
-            
-            // Compare with stored count
-            $stored_count = (int)$file['count'];
-            
-            if ($actual_count !== $stored_count) {
-                $errors[] = "Mismatch for '{$fileKey}': stored={$stored_count}, actual={$actual_count}";
-                
-                // Update the stored count to match actual
-                $updateStmt = $db->getConnection()->prepare('
-                    UPDATE download_stat 
-                    SET count = ? 
-                    WHERE ' . $keyColumn . ' = ?
-                ');
-                $updateStmt->execute([$actual_count, $fileKey]);
-                $corrected_count++;
-                
-                log_message("Corrected download count for '{$fileKey}': {$stored_count} → {$actual_count}");
-            }
-            
-            $verified_count++;
-        } catch (Exception $e) {
-            log_message("WARNING: Failed to verify {$fileKey}: " . $e->getMessage());
+
+    $updateStmt = $pdo->prepare('UPDATE download_stat SET count = ? WHERE ' . $keyColumn . ' = ?');
+
+    foreach ($storedFiles as $file) {
+        $fileKey = $file['file_key'];
+        $stored_count = (int)$file['count'];
+        $actual_count = $actualCounts[ltrim($fileKey, '/')] ?? 0;
+
+        if ($actual_count !== $stored_count) {
+            $errors[] = "Mismatch for '{$fileKey}': stored={$stored_count}, actual={$actual_count}";
+            $updateStmt->execute([$actual_count, $fileKey]);
+            $corrected_count++;
+            log_message("Corrected download count for '{$fileKey}': {$stored_count} → {$actual_count}");
         }
+        $verified_count++;
     }
-    
+
     log_message("Verified $verified_count files, corrected $corrected_count mismatches");
-    
+
     if (!empty($errors)) {
         log_message("Download total mismatches found: " . implode("; ", array_slice($errors, 0, 5)) . (count($errors) > 5 ? "..." : ""));
     }
-    
+
 } catch (Exception $e) {
     log_message("WARNING: Download total verification failed: " . $e->getMessage());
 }
