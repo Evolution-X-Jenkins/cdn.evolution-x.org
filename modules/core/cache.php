@@ -84,20 +84,37 @@ class CacheManager {
         if (CACHE_FILE_ENABLED && $this->file_cache_dir) {
             $file_path = $this->getFileCachePath($key);
             if (file_exists($file_path)) {
-                $value = @file_get_contents($file_path);
-                if ($value !== false) {
-                    $decoded = json_decode($value, true);
-                    
-                    // If we got it from file, try to push to Redis for next time
-                    if ($this->redis_available && $decoded !== null) {
-                        try {
-                            $this->redis->set($key, $value);
-                        } catch (Exception $e) {
-                            error_log('Failed to cache to Redis: ' . $e->getMessage());
+                $raw = @file_get_contents($file_path);
+                if ($raw !== false) {
+                    $wrapper = json_decode($raw, true);
+                    // Support both legacy (raw value) and TTL-aware ({expires,value}) formats
+                    if (is_array($wrapper) && array_key_exists('expires', $wrapper) && array_key_exists('v', $wrapper)) {
+                        if ($wrapper['expires'] !== 0 && time() > $wrapper['expires']) {
+                            @unlink($file_path);
+                            $wrapper = null;
                         }
+                    } else {
+                        // Legacy format — treat the whole decoded value as the payload
+                        $wrapper = ['expires' => 0, 'v' => $wrapper];
                     }
-                    
-                    return $decoded;
+
+                    if ($wrapper !== null) {
+                        $decoded = $wrapper['v'];
+                        // Promote to Redis with remaining TTL
+                        if ($this->redis_available && $decoded !== null) {
+                            try {
+                                $remaining = ($wrapper['expires'] === 0) ? 0 : ($wrapper['expires'] - time());
+                                if ($remaining > 0) {
+                                    $this->redis->setex($key, $remaining, json_encode($decoded, JSON_UNESCAPED_SLASHES));
+                                } elseif ($remaining === 0) {
+                                    $this->redis->set($key, json_encode($decoded, JSON_UNESCAPED_SLASHES));
+                                }
+                            } catch (Exception $e) {
+                                error_log('Failed to cache to Redis: ' . $e->getMessage());
+                            }
+                        }
+                        return $decoded;
+                    }
                 }
             }
         }
@@ -140,8 +157,11 @@ class CacheManager {
         if (CACHE_FILE_ENABLED && $this->file_cache_dir) {
             $file_path = $this->getFileCachePath($key);
             $temp_file = $file_path . '.tmp';
-            
-            if (@file_put_contents($temp_file, $json_value, LOCK_EX)) {
+            $file_wrapper = json_encode([
+                'expires' => $ttl > 0 ? (time() + $ttl) : 0,
+                'v'       => $value,
+            ], JSON_UNESCAPED_SLASHES);
+            if (@file_put_contents($temp_file, $file_wrapper, LOCK_EX)) {
                 @rename($temp_file, $file_path);
             } else {
                 error_log('Failed to write cache file: ' . $file_path);
