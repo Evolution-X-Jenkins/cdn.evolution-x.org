@@ -6,6 +6,7 @@
 
 require_once 'modules/setup/config.php';
 require_once 'modules/setup/database.php';
+require_once 'modules/core/rate_limit.php';
 
 // Initialize database
 $db = Database::getInstance();
@@ -145,6 +146,11 @@ if ($is_download_page) {
 
         log_action('Download page accessed', $target_file);
 
+        $rateLimitState = enforce_download_rate_limit('download-page', $target_file);
+        if (!empty($rateLimitState['blocked'])) {
+            render_rate_limit_429_page($rateLimitState, 'download-page');
+        }
+
         // Record download statistics
         $userId = get_user_id();
         $ipAddress = $_SERVER['REMOTE_ADDR'] ?? '';
@@ -194,6 +200,13 @@ if ($is_proxy_download) {
 function DownloadRom($target_file, $proxy) {
     global $db;
     require_once 'modules/setup/r2_download.php';
+
+    $routeName = $proxy ? 'proxy-download' : 'download';
+    $rateLimitState = enforce_download_rate_limit($routeName, $target_file);
+    if (!empty($rateLimitState['blocked'])) {
+        render_rate_limit_429_page($rateLimitState, $routeName);
+    }
+
     $file_path = sanitize_path($target_file, BASE_PATH);
     if (is_file($file_path)) {
         log_action('Direct download requested', $target_file);

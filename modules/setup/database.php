@@ -93,11 +93,54 @@ class Database {
                     INDEX idx_push_release_queue_status_created (status, created_at),
                     INDEX idx_push_release_queue_created (created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+                CREATE TABLE IF NOT EXISTS requests (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    identity_ip_key VARCHAR(128) NOT NULL,
+                    identity_user_key VARCHAR(128) NOT NULL,
+                    user_id VARCHAR(64) NOT NULL,
+                    ip_address VARCHAR(45) NOT NULL,
+                    route_name VARCHAR(128) NOT NULL,
+                    file_path VARCHAR(1024) DEFAULT '',
+                    user_agent TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_requests_identity_ip_time (identity_ip_key, created_at),
+                    INDEX idx_requests_identity_user_time (identity_user_key, created_at),
+                    INDEX idx_requests_created_at (created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+                CREATE TABLE IF NOT EXISTS rateLimitedIncidents (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    identity_key VARCHAR(128) NOT NULL,
+                    identity_type VARCHAR(16) NOT NULL,
+                    identity_value VARCHAR(255) NOT NULL,
+                    user_id VARCHAR(64) NOT NULL,
+                    ip_address VARCHAR(45) NOT NULL,
+                    route_name VARCHAR(128) NOT NULL,
+                    file_path VARCHAR(1024) DEFAULT '',
+                    request_id BIGINT UNSIGNED NULL,
+                    window_seconds INT NOT NULL,
+                    request_count INT NOT NULL,
+                    offense_level INT NOT NULL,
+                    block_seconds INT NOT NULL DEFAULT 0,
+                    blocked_until DATETIME NULL,
+                    is_permanent TINYINT(1) NOT NULL DEFAULT 0,
+                    action_taken VARCHAR(64) NOT NULL,
+                    csf_status VARCHAR(64) NOT NULL DEFAULT 'pending',
+                    notes TEXT,
+                    user_agent TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_rate_limited_identity_created (identity_key, created_at),
+                    INDEX idx_rate_limited_identity_blocked (identity_key, blocked_until),
+                    INDEX idx_rate_limited_permanent (identity_key, is_permanent),
+                    CONSTRAINT fk_rate_limited_request FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE SET NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             ";
             try {
                 $this->pdo->exec($sql);
                 $this->migratePushReleaseQueueSchema();
                 $this->migratePushReleaseQueueUniqueness();
+                $this->migrateRateLimitIndexes();
             } catch (Exception $e) {
                 error_log("Cache table creation failed (may already exist): " . $e->getMessage());
             }
@@ -157,6 +200,43 @@ class Database {
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- Request logs used by download rate limiting
+            CREATE TABLE IF NOT EXISTS requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                identity_ip_key VARCHAR(128) NOT NULL,
+                identity_user_key VARCHAR(128) NOT NULL,
+                user_id VARCHAR(64) NOT NULL,
+                ip_address VARCHAR(45) NOT NULL,
+                route_name VARCHAR(128) NOT NULL,
+                file_path VARCHAR(1024) DEFAULT '',
+                user_agent TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS rateLimitedIncidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                identity_key VARCHAR(128) NOT NULL,
+                identity_type VARCHAR(16) NOT NULL,
+                identity_value VARCHAR(255) NOT NULL,
+                user_id VARCHAR(64) NOT NULL,
+                ip_address VARCHAR(45) NOT NULL,
+                route_name VARCHAR(128) NOT NULL,
+                file_path VARCHAR(1024) DEFAULT '',
+                request_id INTEGER,
+                window_seconds INTEGER NOT NULL,
+                request_count INTEGER NOT NULL,
+                offense_level INTEGER NOT NULL,
+                block_seconds INTEGER NOT NULL DEFAULT 0,
+                blocked_until DATETIME,
+                is_permanent INTEGER NOT NULL DEFAULT 0,
+                action_taken VARCHAR(64) NOT NULL,
+                csf_status VARCHAR(64) NOT NULL DEFAULT 'pending',
+                notes TEXT,
+                user_agent TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (request_id) REFERENCES requests(id)
+            );
+
             -- Create indexes for better performance
             CREATE INDEX IF NOT EXISTS idx_download_stats_filename ON download_stats(filename);
             CREATE INDEX IF NOT EXISTS idx_download_stats_folder ON download_stats(folder);
@@ -166,12 +246,19 @@ class Database {
             CREATE UNIQUE INDEX IF NOT EXISTS uq_push_release_queue_source_path ON push_release_queue(source_path);
             CREATE INDEX IF NOT EXISTS idx_push_release_queue_status_created ON push_release_queue(status, created_at);
             CREATE INDEX IF NOT EXISTS idx_push_release_queue_created ON push_release_queue(created_at);
+            CREATE INDEX IF NOT EXISTS idx_requests_identity_ip_time ON requests(identity_ip_key, created_at);
+            CREATE INDEX IF NOT EXISTS idx_requests_identity_user_time ON requests(identity_user_key, created_at);
+            CREATE INDEX IF NOT EXISTS idx_requests_created_at ON requests(created_at);
+            CREATE INDEX IF NOT EXISTS idx_rate_limited_identity_created ON rateLimitedIncidents(identity_key, created_at);
+            CREATE INDEX IF NOT EXISTS idx_rate_limited_identity_blocked ON rateLimitedIncidents(identity_key, blocked_until);
+            CREATE INDEX IF NOT EXISTS idx_rate_limited_permanent ON rateLimitedIncidents(identity_key, is_permanent);
         ";
         
         $this->pdo->exec($sql);
         $this->migratePushReleaseQueueSchema();
         $this->migratePushReleaseQueueUniqueness();
         $this->migrateDownloadStatsIndexes();
+        $this->migrateRateLimitIndexes();
         
     }
 
@@ -242,9 +329,171 @@ class Database {
             error_log('download_stats index migration skipped: ' . $e->getMessage());
         }
     }
+
+    private function migrateRateLimitIndexes() {
+        try {
+            if (!defined('DB_TYPE') || DB_TYPE !== 'mysql') {
+                return;
+            }
+
+            $tableStmt = $this->pdo->query("SELECT COUNT(1) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'requests'");
+            if ((int)$tableStmt->fetchColumn() > 0) {
+                $indexes = [
+                    'idx_requests_identity_ip_time' => 'CREATE INDEX idx_requests_identity_ip_time ON requests (identity_ip_key, created_at)',
+                    'idx_requests_identity_user_time' => 'CREATE INDEX idx_requests_identity_user_time ON requests (identity_user_key, created_at)',
+                    'idx_requests_created_at' => 'CREATE INDEX idx_requests_created_at ON requests (created_at)',
+                ];
+
+                foreach ($indexes as $name => $sql) {
+                    $idxStmt = $this->pdo->prepare("SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'requests' AND INDEX_NAME = ?");
+                    $idxStmt->execute([$name]);
+                    if ((int)$idxStmt->fetchColumn() === 0) {
+                        $this->pdo->exec($sql);
+                    }
+                }
+            }
+
+            $incidentStmt = $this->pdo->query("SELECT COUNT(1) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rateLimitedIncidents'");
+            if ((int)$incidentStmt->fetchColumn() > 0) {
+                $indexes = [
+                    'idx_rate_limited_identity_created' => 'CREATE INDEX idx_rate_limited_identity_created ON rateLimitedIncidents (identity_key, created_at)',
+                    'idx_rate_limited_identity_blocked' => 'CREATE INDEX idx_rate_limited_identity_blocked ON rateLimitedIncidents (identity_key, blocked_until)',
+                    'idx_rate_limited_permanent' => 'CREATE INDEX idx_rate_limited_permanent ON rateLimitedIncidents (identity_key, is_permanent)',
+                ];
+
+                foreach ($indexes as $name => $sql) {
+                    $idxStmt = $this->pdo->prepare("SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rateLimitedIncidents' AND INDEX_NAME = ?");
+                    $idxStmt->execute([$name]);
+                    if ((int)$idxStmt->fetchColumn() === 0) {
+                        $this->pdo->exec($sql);
+                    }
+                }
+            }
+        } catch (Exception $e) {
+            error_log('rate limit index migration skipped: ' . $e->getMessage());
+        }
+    }
     
     public function getConnection() {
         return $this->pdo;
+    }
+
+    // Rate limiting persistence methods
+    public function recordRateLimitRequest(array $requestData) {
+        $stmt = $this->pdo->prepare('
+            INSERT INTO requests
+            (identity_ip_key, identity_user_key, user_id, ip_address, route_name, file_path, user_agent)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ');
+        $stmt->execute([
+            $requestData['identity_ip_key'] ?? '',
+            $requestData['identity_user_key'] ?? '',
+            $requestData['user_id'] ?? '',
+            $requestData['ip_address'] ?? '',
+            $requestData['route_name'] ?? '',
+            $requestData['file_path'] ?? '',
+            $requestData['user_agent'] ?? '',
+        ]);
+
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function countRecentRequestsByIdentity($identityKey, $windowSeconds = 60) {
+        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+            $stmt = $this->pdo->prepare('
+                SELECT COUNT(*)
+                FROM requests
+                WHERE (identity_ip_key = ? OR identity_user_key = ?)
+                  AND created_at >= DATE_SUB(NOW(), INTERVAL ? SECOND)
+            ');
+        } else {
+            $stmt = $this->pdo->prepare("
+                SELECT COUNT(*)
+                FROM requests
+                WHERE (identity_ip_key = ? OR identity_user_key = ?)
+                  AND created_at >= datetime('now', '-' || ? || ' seconds')
+            ");
+        }
+        $stmt->execute([$identityKey, $identityKey, (int)$windowSeconds]);
+        return (int)$stmt->fetchColumn();
+    }
+
+    public function createRateLimitIncident(array $incidentData) {
+        $stmt = $this->pdo->prepare('
+            INSERT INTO rateLimitedIncidents
+            (identity_key, identity_type, identity_value, user_id, ip_address, route_name, file_path, request_id,
+             window_seconds, request_count, offense_level, block_seconds, blocked_until, is_permanent,
+             action_taken, csf_status, notes, user_agent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ');
+
+        $stmt->execute([
+            $incidentData['identity_key'] ?? '',
+            $incidentData['identity_type'] ?? '',
+            $incidentData['identity_value'] ?? '',
+            $incidentData['user_id'] ?? '',
+            $incidentData['ip_address'] ?? '',
+            $incidentData['route_name'] ?? '',
+            $incidentData['file_path'] ?? '',
+            $incidentData['request_id'] ?? null,
+            (int)($incidentData['window_seconds'] ?? 0),
+            (int)($incidentData['request_count'] ?? 0),
+            (int)($incidentData['offense_level'] ?? 1),
+            (int)($incidentData['block_seconds'] ?? 0),
+            $incidentData['blocked_until'] ?? null,
+            !empty($incidentData['is_permanent']) ? 1 : 0,
+            $incidentData['action_taken'] ?? 'temporary_block',
+            $incidentData['csf_status'] ?? 'pending',
+            $incidentData['notes'] ?? null,
+            $incidentData['user_agent'] ?? '',
+        ]);
+
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function updateRateLimitIncidentCsfStatus($incidentId, $csfStatus) {
+        $stmt = $this->pdo->prepare('
+            UPDATE rateLimitedIncidents
+            SET csf_status = ?
+            WHERE id = ?
+        ');
+        $stmt->execute([$csfStatus, (int)$incidentId]);
+    }
+
+    public function getActiveRateLimitIncident($identityKey) {
+        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+            $stmt = $this->pdo->prepare('
+                SELECT *
+                FROM rateLimitedIncidents
+                WHERE identity_key = ?
+                  AND (is_permanent = 1 OR blocked_until > NOW())
+                ORDER BY created_at DESC
+                LIMIT 1
+            ');
+        } else {
+            $stmt = $this->pdo->prepare("
+                SELECT *
+                FROM rateLimitedIncidents
+                WHERE identity_key = ?
+                  AND (is_permanent = 1 OR blocked_until > datetime('now'))
+                ORDER BY created_at DESC
+                LIMIT 1
+            ");
+        }
+
+        $stmt->execute([$identityKey]);
+        return $stmt->fetch();
+    }
+
+    public function getRateLimitOffenseLevel($identityKey) {
+        $stmt = $this->pdo->prepare('
+            SELECT MAX(offense_level)
+            FROM rateLimitedIncidents
+            WHERE identity_key = ?
+        ');
+        $stmt->execute([$identityKey]);
+        $level = $stmt->fetchColumn();
+        return $level === false || $level === null ? 0 : (int)$level;
     }
     
     // Download statistics methods
