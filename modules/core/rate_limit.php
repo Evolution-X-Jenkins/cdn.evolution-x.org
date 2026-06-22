@@ -145,7 +145,9 @@ class DownloadRateLimiter {
         $nextOffense = $this->incrementOffenseCount($identityKey);
         $isPermanent = $nextOffense > count(self::BLOCK_LADDER);
         $blockSeconds = $isPermanent ? 0 : self::BLOCK_LADDER[$nextOffense - 1];
-        $blockedUntil = $isPermanent ? null : date('Y-m-d H:i:s', time() + $blockSeconds);
+        $now = time();
+        $futureTime = $now + $blockSeconds;
+        $blockedUntil = $isPermanent ? null : date('Y-m-d H:i:s', $futureTime);
 
         $incidentId = $this->db->createRateLimitIncident([
             'identity_key' => $identityKey,
@@ -164,7 +166,7 @@ class DownloadRateLimiter {
             'is_permanent' => $isPermanent ? 1 : 0,
             'action_taken' => $isPermanent ? 'permanent_ban' : 'temporary_block',
             'csf_status' => 'pending',
-            'notes' => $isPermanent ? 'Escalated to permanent ban threshold' : 'Rate limit threshold exceeded',
+            'notes' => "DEBUG: now=$now, blockSeconds=$blockSeconds, futureTime=$futureTime, calc=" . ($now + $blockSeconds),
             'user_agent' => $userAgent,
         ]);
 
