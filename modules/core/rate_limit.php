@@ -408,7 +408,7 @@ class DownloadRateLimiter {
                 ['name' => 'CSF Status', 'value' => (string)($incident['csfStatus'] ?? 'not_applicable'), 'inline' => true],
             ],
             'footer' => [
-                'text' => 'php_filebrowser_v2 rate-limit monitor'
+                'text' => 'Evolution X Rate Limit Guard'
             ],
             'timestamp' => gmdate('c'),
         ];
