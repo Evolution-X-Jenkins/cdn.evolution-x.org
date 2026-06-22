@@ -173,6 +173,23 @@ class DownloadRateLimiter {
             $this->db->updateRateLimitIncidentCsfStatus((int)$incidentId, $csfStatus);
         }
 
+        $this->notifyDiscordRateLimitIncident([
+            'incidentId' => (int)$incidentId,
+            'identityType' => $identityType,
+            'identityValue' => $identityValue,
+            'userId' => $userId,
+            'ipAddress' => get_client_ip(),
+            'routeName' => $routeName,
+            'filePath' => $filePath,
+            'requestCount' => $requestCount,
+            'offenseLevel' => $nextOffense,
+            'blockSeconds' => $blockSeconds,
+            'blockedUntil' => $blockedUntil,
+            'isPermanent' => $isPermanent,
+            'csfStatus' => $csfStatus ?? 'not_applicable',
+            'userAgent' => $userAgent,
+        ]);
+
         $this->setBlockState($identityKey, $blockSeconds, $isPermanent, $blockedUntil, $nextOffense);
 
         return [
@@ -353,6 +370,175 @@ class DownloadRateLimiter {
 
     private function identityKey(string $type, string $value): string {
         return $type . ':' . hash('sha256', $value);
+    }
+
+    private function notifyDiscordRateLimitIncident(array $incident): void {
+        $config = $this->getDiscordRateLimitWebhookConfig();
+        if (!$config['enabled']) {
+            return;
+        }
+
+        $isPermanent = !empty($incident['isPermanent']);
+        $offenseLevel = (int)($incident['offenseLevel'] ?? 0);
+        $severity = $isPermanent ? 'PERMANENT BAN' : 'Temporary Block';
+        $color = $isPermanent ? 15158332 : 16753920; // Red / Orange
+
+        $durationLabel = $isPermanent
+            ? 'Permanent'
+            : $this->formatDurationLabel((int)($incident['blockSeconds'] ?? 0));
+
+        $title = 'Download Rate Limit Incident - ' . $severity;
+        $description = 'Rate-limit threshold exceeded and a block was issued.';
+
+        $embed = [
+            'title' => $title,
+            'description' => $description,
+            'color' => $color,
+            'fields' => [
+                ['name' => 'Incident ID', 'value' => (string)($incident['incidentId'] ?? 0), 'inline' => true],
+                ['name' => 'Offense Level', 'value' => (string)$offenseLevel, 'inline' => true],
+                ['name' => 'Window Count', 'value' => (string)($incident['requestCount'] ?? 0) . ' requests / 60s', 'inline' => true],
+                ['name' => 'Identity Type', 'value' => (string)($incident['identityType'] ?? 'unknown'), 'inline' => true],
+                ['name' => 'IP Address', 'value' => (string)($incident['ipAddress'] ?? 'unknown'), 'inline' => true],
+                ['name' => 'User ID', 'value' => (string)($incident['userId'] ?? 'unknown'), 'inline' => true],
+                ['name' => 'Route', 'value' => (string)($incident['routeName'] ?? 'unknown'), 'inline' => true],
+                ['name' => 'File', 'value' => (string)($incident['filePath'] ?? 'n/a'), 'inline' => false],
+                ['name' => 'Block Duration', 'value' => $durationLabel, 'inline' => true],
+                ['name' => 'Blocked Until', 'value' => (string)($incident['blockedUntil'] ?? 'n/a'), 'inline' => true],
+                ['name' => 'CSF Status', 'value' => (string)($incident['csfStatus'] ?? 'not_applicable'), 'inline' => true],
+            ],
+            'footer' => [
+                'text' => 'php_filebrowser_v2 rate-limit monitor'
+            ],
+            'timestamp' => gmdate('c'),
+        ];
+
+        $payload = [
+            'username' => $config['username'],
+            'embeds' => [$embed],
+        ];
+
+        if ($config['avatarUrl'] !== '') {
+            $payload['avatar_url'] = $config['avatarUrl'];
+        }
+
+        if ($config['mention'] !== '') {
+            $payload['content'] = $config['mention'];
+            $payload['allowed_mentions'] = [
+                'parse' => ['users', 'roles'],
+            ];
+        }
+
+        $result = $this->sendJsonWebhookRequest($config['url'], $payload);
+        if (empty($result['sent'])) {
+            error_log('Rate limit Discord webhook failed: ' . ($result['error'] ?? 'unknown error'));
+            return;
+        }
+
+        error_log('Rate limit Discord webhook sent (HTTP ' . (int)($result['httpCode'] ?? 0) . ') for incident #' . (int)($incident['incidentId'] ?? 0));
+    }
+
+    private function getDiscordRateLimitWebhookConfig(): array {
+        return [
+            'enabled' => defined('DISCORD_RATE_LIMIT_WEBHOOK_URL') && DISCORD_RATE_LIMIT_WEBHOOK_URL !== '',
+            'url' => defined('DISCORD_RATE_LIMIT_WEBHOOK_URL') ? DISCORD_RATE_LIMIT_WEBHOOK_URL : '',
+            'username' => defined('DISCORD_RATE_LIMIT_WEBHOOK_USERNAME') ? DISCORD_RATE_LIMIT_WEBHOOK_USERNAME : 'Evolution X Rate Limit Guard',
+            'avatarUrl' => defined('DISCORD_RATE_LIMIT_WEBHOOK_AVATAR_URL') ? DISCORD_RATE_LIMIT_WEBHOOK_AVATAR_URL : '',
+            'mention' => defined('DISCORD_RATE_LIMIT_WEBHOOK_MENTION') ? DISCORD_RATE_LIMIT_WEBHOOK_MENTION : '',
+        ];
+    }
+
+    private function sendJsonWebhookRequest(string $url, array $payload): array {
+        $responseBody = '';
+        $httpCode = 0;
+        $error = null;
+        $body = json_encode($payload, JSON_UNESCAPED_SLASHES);
+
+        if ($body === false) {
+            return [
+                'sent' => false,
+                'httpCode' => 0,
+                'error' => 'Failed to encode webhook payload',
+            ];
+        }
+
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'Content-Length: ' . strlen($body),
+            ]);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+
+            $response = curl_exec($ch);
+            if ($response === false) {
+                $error = curl_error($ch);
+            } else {
+                $responseBody = (string)$response;
+            }
+
+            $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+        } else {
+            $context = stream_context_create([
+                'http' => [
+                    'method' => 'POST',
+                    'header' => "Content-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\n",
+                    'content' => $body,
+                    'timeout' => 8,
+                    'ignore_errors' => true,
+                ],
+            ]);
+
+            $response = @file_get_contents($url, false, $context);
+            if ($response === false) {
+                $error = 'HTTP webhook failed (curl extension unavailable)';
+            } else {
+                $responseBody = (string)$response;
+            }
+
+            if (isset($http_response_header) && is_array($http_response_header)) {
+                foreach ($http_response_header as $headerLine) {
+                    if (preg_match('/HTTP\/\d\.\d\s+(\d{3})/', $headerLine, $matches)) {
+                        $httpCode = (int)$matches[1];
+                        break;
+                    }
+                }
+            }
+        }
+
+        if ($error === null && ($httpCode < 200 || $httpCode >= 300)) {
+            $error = 'Webhook returned HTTP ' . $httpCode;
+        }
+
+        return [
+            'sent' => $error === null,
+            'httpCode' => $httpCode,
+            'error' => $error,
+            'response' => substr($responseBody, 0, 1000),
+        ];
+    }
+
+    private function formatDurationLabel(int $seconds): string {
+        if ($seconds <= 0) {
+            return 'n/a';
+        }
+
+        if ($seconds % 3600 === 0) {
+            $hours = (int)($seconds / 3600);
+            return $hours . ' hour' . ($hours === 1 ? '' : 's');
+        }
+
+        if ($seconds % 60 === 0) {
+            $minutes = (int)($seconds / 60);
+            return $minutes . ' minute' . ($minutes === 1 ? '' : 's');
+        }
+
+        return $seconds . ' seconds';
     }
 }
 
