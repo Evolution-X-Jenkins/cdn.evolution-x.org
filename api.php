@@ -15,6 +15,7 @@ require_once __DIR__ . '/modules/api/daily_downloads.php';
 require_once __DIR__ . '/modules/api/stats_dashboard.php';
 require_once __DIR__ . '/modules/api/hash_management.php';
 require_once __DIR__ . '/modules/api/store_hashes.php';
+require_once __DIR__ . '/modules/api/download_blocks.php';
 require_once __DIR__ . '/api/fetch-ota-hashes.php';
 
 // CORS headers
@@ -117,6 +118,10 @@ function handleApiRequest() {
         case 'download-stats':
             $result = handleDownloadStatisticsApi($method, $pathParts);
             break;
+
+        case 'download-blocks':
+            $result = handleDownloadBlocksApi($method, $pathParts);
+            break;
             
         case 'daily-downloads':
             $result = handleDailyDownloadsApi($method, $pathParts);
@@ -159,7 +164,7 @@ function handleApiRequest() {
             $result = [
                 'error' => 'Unknown API endpoint',
                 'endpoint' => $endpoint,
-                'available' => ['push', 'push-jobs', 'download-statistics', 'daily-downloads', 'daily-summary', 'stats-dashboard', 'file-hashes', 'store-hashes', 'file-operations', 'health', 'fetch-ota-hashes']
+                'available' => ['push', 'push-jobs', 'download-statistics', 'download-blocks', 'daily-downloads', 'daily-summary', 'stats-dashboard', 'file-hashes', 'store-hashes', 'file-operations', 'health', 'fetch-ota-hashes']
             ];
             jsonResponse($result, 404);
     }
