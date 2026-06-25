@@ -3,7 +3,7 @@
  * Download request rate limiting.
  *
  * Rules:
- * - More than 3 download initiations in 60 seconds triggers a block.
+ * - More than 5 download initiations in 30 seconds triggers a block.
  * - Block escalation per identity: 30m -> 2h -> 24h -> permanent ban.
  * - Applies to both IP and user ID identities; stricter result wins.
  */
@@ -12,8 +12,8 @@ require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
 
 class DownloadRateLimiter {
-    private const WINDOW_SECONDS = 60;
-    private const MAX_REQUESTS = 3;
+    private const WINDOW_SECONDS = 30;
+    private const MAX_REQUESTS = 5;
 
     // Escalation ladder in seconds. The final step is permanent.
     private const BLOCK_LADDER = [1800, 7200, 86400];
