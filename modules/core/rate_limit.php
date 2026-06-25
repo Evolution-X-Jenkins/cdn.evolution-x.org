@@ -181,6 +181,7 @@ class DownloadRateLimiter {
             'ipAddress' => get_client_ip(),
             'routeName' => $routeName,
             'filePath' => $filePath,
+            'windowSeconds' => self::WINDOW_SECONDS,
             'requestCount' => $requestCount,
             'offenseLevel' => $nextOffense,
             'blockSeconds' => $blockSeconds,
@@ -397,7 +398,7 @@ class DownloadRateLimiter {
             'fields' => [
                 ['name' => 'Incident ID', 'value' => (string)($incident['incidentId'] ?? 0), 'inline' => true],
                 ['name' => 'Offense Level', 'value' => (string)$offenseLevel, 'inline' => true],
-                ['name' => 'Window Count', 'value' => (string)($incident['requestCount'] ?? 0) . ' requests / 60s', 'inline' => true],
+                ['name' => 'Window Count', 'value' => (string)($incident['requestCount'] ?? 0) . ' requests / ' . (string)($incident['windowSeconds'] ?? self::WINDOW_SECONDS) . 's', 'inline' => true],
                 ['name' => 'Identity Type', 'value' => (string)($incident['identityType'] ?? 'unknown'), 'inline' => true],
                 ['name' => 'IP Address', 'value' => (string)($incident['ipAddress'] ?? 'unknown'), 'inline' => true],
                 ['name' => 'User ID', 'value' => (string)($incident['userId'] ?? 'unknown'), 'inline' => true],
