@@ -227,6 +227,7 @@ class DownloadRateLimiter {
             'offenseLevel' => $nextOffense,
             'blockSeconds' => $blockSeconds,
             'blockedUntil' => $blockedUntil,
+            'blockedAtUnix' => time(),
             'isPermanent' => $isPermanent,
             'csfStatus' => $csfStatus ?? 'not_applicable',
             'userAgent' => $userAgent,
@@ -336,6 +337,7 @@ class DownloadRateLimiter {
             'offenseLevel' => $nextOffense,
             'blockSeconds' => $blockSeconds,
             'blockedUntil' => $blockedUntil,
+            'blockedAtUnix' => time(),
             'isPermanent' => $isPermanent,
             'csfStatus' => $csfStatus ?? 'not_applicable',
             'userAgent' => $userAgent,
@@ -555,13 +557,27 @@ class DownloadRateLimiter {
         }
 
         $blockedUntil = isset($incident['blocked_until']) ? strtotime((string)$incident['blocked_until']) : 0;
-        if ($blockedUntil <= time()) {
+        $now = time();
+
+        // Handle clock skew between PHP and DB by falling back to created_at + block_seconds.
+        if ($blockedUntil <= $now) {
+            $createdAtTs = isset($incident['created_at']) ? strtotime((string)$incident['created_at']) : 0;
+            $blockSeconds = isset($incident['block_seconds']) ? (int)$incident['block_seconds'] : 0;
+            if ($createdAtTs > 0 && $blockSeconds > 0) {
+                $derivedUntil = $createdAtTs + $blockSeconds;
+                if ($derivedUntil > $now) {
+                    $blockedUntil = $derivedUntil;
+                }
+            }
+        }
+
+        if ($blockedUntil <= $now) {
             return [];
         }
 
         return [
             'blocked' => true,
-            'retryAfterSeconds' => $blockedUntil - time(),
+            'retryAfterSeconds' => $blockedUntil - $now,
             'blockedUntil' => date('Y-m-d H:i:s', $blockedUntil),
             'isPermanent' => false,
             'reason' => 'rate_limit_exceeded',
@@ -667,27 +683,33 @@ class DownloadRateLimiter {
         $durationLabel = $isPermanent
             ? 'Permanent'
             : $this->formatDurationLabel((int)($incident['blockSeconds'] ?? 0));
+        $blockedAtUnix = (int)($incident['blockedAtUnix'] ?? time());
+        $blockedAtLabel = '<t:' . $blockedAtUnix . ':F> (<t:' . $blockedAtUnix . ':R>)';
+        $blockedUntilRaw = (string)($incident['blockedUntil'] ?? '');
+        $blockedUntilUnix = $blockedUntilRaw !== '' ? strtotime($blockedUntilRaw) : false;
+        $blockedUntilLabel = ($blockedUntilUnix !== false && $blockedUntilUnix > 0)
+            ? '<t:' . $blockedUntilUnix . ':F> (<t:' . $blockedUntilUnix . ':R>)'
+            : 'n/a';
 
         $title = 'Download Rate Limit Incident - ' . $severity;
-        $description = 'Rate-limit threshold exceeded and a block was issued.';
+        $summaryLines = [
+            '**Incident ID:** `' . (string)($incident['incidentId'] ?? 0) . '`',
+            '**Offense Level:** `' . (string)$offenseLevel . '`',
+            '**Identity Type:** `' . (string)($incident['identityType'] ?? 'unknown') . '`',
+            '**IP Address:** `' . (string)($incident['ipAddress'] ?? 'unknown') . '`',
+            '**User ID:** `' . (string)($incident['userId'] ?? 'unknown') . '`',
+            '**File Path:** `' . (string)($incident['filePath'] ?? 'n/a') . '`',
+            '**Blocked At:** ' . $blockedAtLabel,
+            '**Block Duration:** `' . $durationLabel . '`',
+            '**Blocked Until:** ' . $blockedUntilLabel,
+            '**CSF Status:** `' . (string)($incident['csfStatus'] ?? 'not_applicable') . '`',
+        ];
+        $description = implode("\n\n", $summaryLines);
 
         $embed = [
             'title' => $title,
             'description' => $description,
             'color' => $color,
-            'fields' => [
-                ['name' => 'Incident ID', 'value' => (string)($incident['incidentId'] ?? 0), 'inline' => true],
-                ['name' => 'Offense Level', 'value' => (string)$offenseLevel, 'inline' => true],
-                ['name' => 'Window Count', 'value' => (string)($incident['requestCount'] ?? 0) . ' requests / ' . (string)($incident['windowSeconds'] ?? self::WINDOW_SECONDS) . 's', 'inline' => true],
-                ['name' => 'Identity Type', 'value' => (string)($incident['identityType'] ?? 'unknown'), 'inline' => true],
-                ['name' => 'IP Address', 'value' => (string)($incident['ipAddress'] ?? 'unknown'), 'inline' => true],
-                ['name' => 'User ID', 'value' => (string)($incident['userId'] ?? 'unknown'), 'inline' => true],
-                ['name' => 'Route', 'value' => (string)($incident['routeName'] ?? 'unknown'), 'inline' => true],
-                ['name' => 'File', 'value' => (string)($incident['filePath'] ?? 'n/a'), 'inline' => false],
-                ['name' => 'Block Duration', 'value' => $durationLabel, 'inline' => true],
-                ['name' => 'Blocked Until', 'value' => (string)($incident['blockedUntil'] ?? 'n/a'), 'inline' => true],
-                ['name' => 'CSF Status', 'value' => (string)($incident['csfStatus'] ?? 'not_applicable'), 'inline' => true],
-            ],
             'footer' => [
                 'text' => 'Evolution X Rate Limit Guard'
             ],

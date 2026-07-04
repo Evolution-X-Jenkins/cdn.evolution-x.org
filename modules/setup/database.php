@@ -484,25 +484,13 @@ class Database {
     }
 
     public function getActiveRateLimitIncident($identityKey) {
-        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
-            $stmt = $this->pdo->prepare('
-                SELECT *
-                FROM rateLimitedIncidents
-                WHERE identity_key = ?
-                  AND (is_permanent = 1 OR blocked_until > NOW())
-                ORDER BY created_at DESC
-                LIMIT 1
-            ');
-        } else {
-            $stmt = $this->pdo->prepare("
-                SELECT *
-                FROM rateLimitedIncidents
-                WHERE identity_key = ?
-                  AND (is_permanent = 1 OR blocked_until > datetime('now'))
-                ORDER BY created_at DESC
-                LIMIT 1
-            ");
-        }
+        $stmt = $this->pdo->prepare('
+            SELECT *
+            FROM rateLimitedIncidents
+            WHERE identity_key = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+        ');
 
         $stmt->execute([$identityKey]);
         return $stmt->fetch();
