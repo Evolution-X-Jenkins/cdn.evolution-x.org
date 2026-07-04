@@ -145,6 +145,71 @@ class DownloadRateLimiter {
         ];
     }
 
+    public function getIdentityStatus(string $identityType, string $identityValue): array {
+        $identityType = strtolower(trim($identityType));
+        $identityValue = trim($identityValue);
+
+        if (!in_array($identityType, ['ip', 'user'], true) || $identityValue === '') {
+            return [
+                'identityType' => $identityType,
+                'identityValue' => $identityValue,
+                'blocked' => false,
+                'retryAfterSeconds' => 0,
+                'blockedUntil' => null,
+                'isPermanent' => false,
+                'offenseLevel' => 0,
+            ];
+        }
+
+        $identityKey = $this->identityKey($identityType, $identityValue);
+        $active = $this->getActiveBlock($identityKey);
+        $offenseLevel = $this->db->getRateLimitOffenseLevel($identityKey);
+        $latestIncident = $this->db->getLatestRateLimitIncident($identityKey);
+
+        return [
+            'identityType' => $identityType,
+            'identityValue' => $identityValue,
+            'blocked' => !empty($active['blocked']),
+            'retryAfterSeconds' => (int)($active['retryAfterSeconds'] ?? 0),
+            'blockedUntil' => $active['blockedUntil'] ?? null,
+            'isPermanent' => !empty($active['isPermanent']),
+            'offenseLevel' => (int)$offenseLevel,
+            'lastIncidentAt' => $latestIncident['created_at'] ?? null,
+        ];
+    }
+
+    public function unblockIdentity(string $identityType, string $identityValue): array {
+        $identityType = strtolower(trim($identityType));
+        $identityValue = trim($identityValue);
+
+        if (!in_array($identityType, ['ip', 'user'], true) || $identityValue === '') {
+            throw new InvalidArgumentException('identityType must be ip or user, and identityValue is required');
+        }
+
+        $identityKey = $this->identityKey($identityType, $identityValue);
+        $clearedRows = $this->db->clearActiveRateLimitIncidents($identityKey);
+
+        if ($this->redisAvailable) {
+            try {
+                $this->redis->del('rl:block:' . $identityKey);
+                $this->redis->del('rl:offense:' . $identityKey);
+                $this->redis->del('rl:req:' . $identityKey);
+                if ($identityType === 'ip') {
+                    $this->redis->del('rl:ipusers:' . hash('sha256', $identityValue));
+                }
+            } catch (Exception $e) {
+                error_log('Rate limiter unblock redis cleanup failed: ' . $e->getMessage());
+            }
+        }
+
+        return [
+            'identityType' => $identityType,
+            'identityValue' => $identityValue,
+            'unblocked' => true,
+            'clearedIncidentRows' => $clearedRows,
+        ];
+    }
+
     private function evaluateIdentity(
         string $identityType,
         string $identityValue,
@@ -853,6 +918,16 @@ function enforce_download_rate_limit(string $routeName, string $filePath = ''): 
 function get_download_rate_limit_status(): array {
     $limiter = new DownloadRateLimiter();
     return $limiter->getCurrentStatus();
+}
+
+function get_rate_limit_identity_status(string $identityType, string $identityValue): array {
+    $limiter = new DownloadRateLimiter();
+    return $limiter->getIdentityStatus($identityType, $identityValue);
+}
+
+function unblock_rate_limit_identity(string $identityType, string $identityValue): array {
+    $limiter = new DownloadRateLimiter();
+    return $limiter->unblockIdentity($identityType, $identityValue);
 }
 
 function render_rate_limit_429_page(array $limitState, string $routeName = ''): void {

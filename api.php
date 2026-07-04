@@ -16,6 +16,7 @@ require_once __DIR__ . '/modules/api/stats_dashboard.php';
 require_once __DIR__ . '/modules/api/hash_management.php';
 require_once __DIR__ . '/modules/api/store_hashes.php';
 require_once __DIR__ . '/modules/api/download_blocks.php';
+require_once __DIR__ . '/modules/api/discord_bot.php';
 require_once __DIR__ . '/api/fetch-ota-hashes.php';
 
 // CORS headers
@@ -155,6 +156,20 @@ function handleApiRequest() {
         case 'health':
             $result = handleHealthApi($method, $pathParts);
             break;
+
+        case 'discord-bot':
+            $result = handleDiscordBotApi($method, $pathParts);
+            if (isset($result['status']) && $result['status'] === 'error' && isset($result['APICode'])) {
+                $statusMap = [
+                    'D-0001' => 401,
+                    'D-0002' => 400,
+                    'D-0003' => 405,
+                    'D-0004' => 500,
+                ];
+                $status = $statusMap[$result['APICode']] ?? 400;
+                jsonResponse($result, $status);
+            }
+            break;
             
         case 'fetch-ota-hashes':
             handleFetchOTAHashes();
@@ -164,7 +179,7 @@ function handleApiRequest() {
             $result = [
                 'error' => 'Unknown API endpoint',
                 'endpoint' => $endpoint,
-                'available' => ['push', 'push-jobs', 'download-statistics', 'download-blocks', 'daily-downloads', 'daily-summary', 'stats-dashboard', 'file-hashes', 'store-hashes', 'file-operations', 'health', 'fetch-ota-hashes']
+                'available' => ['push', 'push-jobs', 'download-statistics', 'download-blocks', 'daily-downloads', 'daily-summary', 'stats-dashboard', 'file-hashes', 'store-hashes', 'file-operations', 'health', 'discord-bot', 'fetch-ota-hashes']
             ];
             jsonResponse($result, 404);
     }

@@ -506,6 +506,47 @@ class Database {
         $level = $stmt->fetchColumn();
         return $level === false || $level === null ? 0 : (int)$level;
     }
+
+    public function getLatestRateLimitIncident($identityKey) {
+        $stmt = $this->pdo->prepare('
+            SELECT *
+            FROM rateLimitedIncidents
+            WHERE identity_key = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+        ');
+        $stmt->execute([$identityKey]);
+        return $stmt->fetch();
+    }
+
+    public function clearActiveRateLimitIncidents($identityKey) {
+        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+            $stmt = $this->pdo->prepare('
+                UPDATE rateLimitedIncidents
+                SET
+                    blocked_until = NOW(),
+                    is_permanent = 0,
+                    action_taken = "manual_unblock",
+                    notes = CONCAT(COALESCE(notes, ""), IF(COALESCE(notes, "") = "", "", " | "), "Manual unblock via discord-bot API")
+                WHERE identity_key = ?
+                  AND (is_permanent = 1 OR blocked_until > NOW())
+            ');
+        } else {
+            $stmt = $this->pdo->prepare("
+                UPDATE rateLimitedIncidents
+                SET
+                    blocked_until = datetime('now'),
+                    is_permanent = 0,
+                    action_taken = 'manual_unblock',
+                    notes = COALESCE(notes, '') || CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE ' | ' END || 'Manual unblock via discord-bot API'
+                WHERE identity_key = ?
+                  AND (is_permanent = 1 OR blocked_until > datetime('now'))
+            ");
+        }
+
+        $stmt->execute([$identityKey]);
+        return (int)$stmt->rowCount();
+    }
     
     // Download statistics methods
     public function recordDownload($filePath, $userId = null, $ipAddress = '', $userAgent = '', $referer = '', $fileSize = 0, $success = true) {
