@@ -40,3 +40,6 @@ composer.phar
 # Temp data directory
 data
 data/*
+
+# Local development files
+start.sh
