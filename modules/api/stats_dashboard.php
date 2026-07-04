@@ -377,13 +377,16 @@ function buildEmptyBreakdownSeries($timeframe) {
 }
 
 function buildAvailableDevices($pdo) {
-    $stmt = $pdo->query('SELECT folder FROM download_stats');
-    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+        $stmt = $pdo->query("\n            SELECT DISTINCT SUBSTRING_INDEX(TRIM(BOTH '/' FROM folder), '/', 1) as device\n            FROM download_stats\n            WHERE TRIM(BOTH '/' FROM folder) <> ''\n        ");
+    } else {
+        $stmt = $pdo->query("\n            SELECT DISTINCT\n                CASE\n                    WHEN instr(trim(folder, '/'), '/') > 0\n                        THEN substr(trim(folder, '/'), 1, instr(trim(folder, '/'), '/') - 1)\n                    ELSE trim(folder, '/')\n                END as device\n            FROM download_stats\n            WHERE trim(folder, '/') <> ''\n        ");
+    }
 
     $set = [];
-    foreach ($rows as $row) {
-        $device = extractDeviceFromFolder((string)($row['folder'] ?? ''));
-        if ($device === 'root') {
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $device = trim((string)($row['device'] ?? ''));
+        if ($device === '') {
             continue;
         }
         $set[$device] = true;
@@ -406,10 +409,8 @@ function buildTopDevices($pdo, $timeframe, $selectedDevice, $limit) {
         GROUP BY folder
     ');
     $stmt->execute($clause['params']);
-    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
     $deviceCounts = [];
-    foreach ($rows as $row) {
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $device = extractDeviceFromFolder((string)($row['folder'] ?? ''));
         if (!isset($deviceCounts[$device])) {
             $deviceCounts[$device] = 0;
