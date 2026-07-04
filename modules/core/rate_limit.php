@@ -5,7 +5,8 @@
  * Rules:
  * - More than 5 download initiations in 30 seconds triggers a block.
  * - Block escalation per identity: 30m -> 2h -> 24h -> permanent ban.
- * - Applies to both IP and user ID identities; stricter result wins.
+ * - User-level abuse is blocked per user ID.
+ * - IP-level abuse is blocked only when multiple distinct users abuse from one IP.
  */
 
 require_once __DIR__ . '/../setup/config.php';
@@ -14,9 +15,13 @@ require_once __DIR__ . '/../setup/database.php';
 class DownloadRateLimiter {
     private const WINDOW_SECONDS = 30;
     private const MAX_REQUESTS = 5;
+    private const MULTI_USER_IP_THRESHOLD = 2;
 
     // Escalation ladder in seconds. The final step is permanent.
     private const BLOCK_LADDER = [1800, 7200, 86400];
+    private const IP_USER_ACTIVITY_TTL = self::WINDOW_SECONDS * 3;
+    private const IDENTITY_ASSOC_RETENTION_SECONDS = 2592000;
+    private const IDENTITY_ASSOC_FILE = __DIR__ . '/../../data/cache/rate_limit_identity_associations.json';
 
     private $db;
     private $redis;
@@ -58,49 +63,43 @@ class DownloadRateLimiter {
         $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
 
         $requestId = $this->recordRequest($userId, $ipAddress, $routeName, $filePath, $userAgent);
+        $this->recordIdentityAssociation($ipAddress, $userId);
+        $this->registerIpUserActivity($ipAddress, $userId);
 
-        $evaluations = [];
-        $evaluations[] = $this->evaluateIdentity('ip', $ipAddress, $userId, $routeName, $filePath, $userAgent, $requestId);
-
-        if (!empty($userId)) {
-            $evaluations[] = $this->evaluateIdentity('user', $userId, $userId, $routeName, $filePath, $userAgent, $requestId);
+        if ($userId !== '') {
+            $existingUserBlock = $this->getActiveBlock($this->identityKey('user', $userId));
+            if (!empty($existingUserBlock)) {
+                return $existingUserBlock;
+            }
         }
 
-        $activeBlocks = array_values(array_filter($evaluations, static function ($result) {
-            return !empty($result['blocked']);
-        }));
-
-        if (empty($activeBlocks)) {
-            return [
-                'blocked' => false,
-                'retryAfterSeconds' => 0,
-                'blockedUntil' => null,
-                'isPermanent' => false,
-                'reason' => null,
-            ];
+        if ($ipAddress !== '') {
+            $existingIpBlock = $this->getActiveBlock($this->identityKey('ip', $ipAddress));
+            if (!empty($existingIpBlock)) {
+                return $existingIpBlock;
+            }
         }
 
-        // Permanent block has highest priority, then the furthest blocked-until timestamp.
-        usort($activeBlocks, static function ($a, $b) {
-            if ($a['isPermanent'] && !$b['isPermanent']) {
-                return -1;
+        if ($userId !== '') {
+            $userEvaluation = $this->evaluateIdentity('user', $userId, $userId, $routeName, $filePath, $userAgent, $requestId);
+            if (!empty($userEvaluation['blocked'])) {
+                return $userEvaluation;
             }
-            if (!$a['isPermanent'] && $b['isPermanent']) {
-                return 1;
+        }
+
+        if ($ipAddress !== '') {
+            $ipEvaluation = $this->evaluateIpIdentity($ipAddress, $userId, $routeName, $filePath, $userAgent, $requestId);
+            if (!empty($ipEvaluation['blocked'])) {
+                return $ipEvaluation;
             }
+        }
 
-            $aUntil = isset($a['blockedUntil']) && $a['blockedUntil'] !== null ? strtotime($a['blockedUntil']) : 0;
-            $bUntil = isset($b['blockedUntil']) && $b['blockedUntil'] !== null ? strtotime($b['blockedUntil']) : 0;
-            return $bUntil <=> $aUntil;
-        });
-
-        $winner = $activeBlocks[0];
         return [
-            'blocked' => true,
-            'retryAfterSeconds' => (int)($winner['retryAfterSeconds'] ?? 0),
-            'blockedUntil' => $winner['blockedUntil'] ?? null,
-            'isPermanent' => !empty($winner['isPermanent']),
-            'reason' => $winner['reason'] ?? 'rate_limit_exceeded',
+            'blocked' => false,
+            'retryAfterSeconds' => 0,
+            'blockedUntil' => null,
+            'isPermanent' => false,
+            'reason' => null,
         ];
     }
 
@@ -108,57 +107,41 @@ class DownloadRateLimiter {
         $userId = get_user_id();
         $ipAddress = get_client_ip();
 
-        $activeBlocks = [];
+        if ($userId !== '') {
+            $userBlock = $this->getActiveBlock($this->identityKey('user', $userId));
+            if (!empty($userBlock)) {
+                return [
+                    'blocked' => true,
+                    'retryAfterSeconds' => (int)($userBlock['retryAfterSeconds'] ?? 0),
+                    'blockedUntil' => $userBlock['blockedUntil'] ?? null,
+                    'isPermanent' => !empty($userBlock['isPermanent']),
+                    'reason' => $userBlock['reason'] ?? 'rate_limit_exceeded',
+                    'identityType' => 'user',
+                ];
+            }
+        }
 
         if ($ipAddress !== '') {
             $ipBlock = $this->getActiveBlock($this->identityKey('ip', $ipAddress));
             if (!empty($ipBlock)) {
-                $ipBlock['identityType'] = 'ip';
-                $activeBlocks[] = $ipBlock;
+                return [
+                    'blocked' => true,
+                    'retryAfterSeconds' => (int)($ipBlock['retryAfterSeconds'] ?? 0),
+                    'blockedUntil' => $ipBlock['blockedUntil'] ?? null,
+                    'isPermanent' => !empty($ipBlock['isPermanent']),
+                    'reason' => $ipBlock['reason'] ?? 'rate_limit_exceeded',
+                    'identityType' => 'ip',
+                ];
             }
         }
-
-        if ($userId !== '') {
-            $userBlock = $this->getActiveBlock($this->identityKey('user', $userId));
-            if (!empty($userBlock)) {
-                $userBlock['identityType'] = 'user';
-                $activeBlocks[] = $userBlock;
-            }
-        }
-
-        if (empty($activeBlocks)) {
-            return [
-                'blocked' => false,
-                'retryAfterSeconds' => 0,
-                'blockedUntil' => null,
-                'isPermanent' => false,
-                'reason' => null,
-                'identityType' => null,
-            ];
-        }
-
-        usort($activeBlocks, static function ($a, $b) {
-            if (!empty($a['isPermanent']) && empty($b['isPermanent'])) {
-                return -1;
-            }
-            if (empty($a['isPermanent']) && !empty($b['isPermanent'])) {
-                return 1;
-            }
-
-            $aUntil = isset($a['blockedUntil']) && $a['blockedUntil'] !== null ? strtotime($a['blockedUntil']) : 0;
-            $bUntil = isset($b['blockedUntil']) && $b['blockedUntil'] !== null ? strtotime($b['blockedUntil']) : 0;
-            return $bUntil <=> $aUntil;
-        });
-
-        $winner = $activeBlocks[0];
 
         return [
-            'blocked' => true,
-            'retryAfterSeconds' => (int)($winner['retryAfterSeconds'] ?? 0),
-            'blockedUntil' => $winner['blockedUntil'] ?? null,
-            'isPermanent' => !empty($winner['isPermanent']),
-            'reason' => $winner['reason'] ?? 'rate_limit_exceeded',
-            'identityType' => $winner['identityType'] ?? null,
+            'blocked' => false,
+            'retryAfterSeconds' => 0,
+            'blockedUntil' => null,
+            'isPermanent' => false,
+            'reason' => null,
+            'identityType' => null,
         ];
     }
 
@@ -258,6 +241,245 @@ class DownloadRateLimiter {
             'isPermanent' => $isPermanent,
             'reason' => $isPermanent ? 'permanent_firewall_ban' : 'rate_limit_exceeded',
         ];
+    }
+
+    private function evaluateIpIdentity(
+        string $ipAddress,
+        string $userId,
+        string $routeName,
+        string $filePath,
+        string $userAgent,
+        int $requestId
+    ): array {
+        if ($ipAddress === '') {
+            return [
+                'blocked' => false,
+                'retryAfterSeconds' => 0,
+                'blockedUntil' => null,
+                'isPermanent' => false,
+                'reason' => null,
+            ];
+        }
+
+        $identityKey = $this->identityKey('ip', $ipAddress);
+
+        $existingBlock = $this->getActiveBlock($identityKey);
+        if (!empty($existingBlock)) {
+            return $existingBlock;
+        }
+
+        $requestCount = $this->registerAndCountRecentRequests($identityKey);
+        if ($requestCount <= self::MAX_REQUESTS) {
+            return [
+                'blocked' => false,
+                'retryAfterSeconds' => 0,
+                'blockedUntil' => null,
+                'isPermanent' => false,
+                'reason' => null,
+            ];
+        }
+
+        $distinctUsers = $this->countRecentDistinctUsersForIp($ipAddress);
+        if ($distinctUsers < self::MULTI_USER_IP_THRESHOLD) {
+            return [
+                'blocked' => false,
+                'retryAfterSeconds' => 0,
+                'blockedUntil' => null,
+                'isPermanent' => false,
+                'reason' => null,
+            ];
+        }
+
+        $nextOffense = $this->incrementOffenseCount($identityKey);
+        $isPermanent = $nextOffense > count(self::BLOCK_LADDER);
+        $blockSeconds = $isPermanent ? 0 : self::BLOCK_LADDER[$nextOffense - 1];
+        $blockedUntil = $isPermanent ? null : date('Y-m-d H:i:s', time() + $blockSeconds);
+
+        $incidentId = $this->db->createRateLimitIncident([
+            'identity_key' => $identityKey,
+            'identity_type' => 'ip',
+            'identity_value' => $ipAddress,
+            'user_id' => $userId,
+            'ip_address' => get_client_ip(),
+            'route_name' => $routeName,
+            'file_path' => $filePath,
+            'request_id' => $requestId,
+            'window_seconds' => self::WINDOW_SECONDS,
+            'request_count' => $requestCount,
+            'offense_level' => $nextOffense,
+            'block_seconds' => $blockSeconds,
+            'blocked_until' => $blockedUntil,
+            'is_permanent' => $isPermanent ? 1 : 0,
+            'action_taken' => $isPermanent ? 'permanent_ban' : 'temporary_block',
+            'csf_status' => 'pending',
+            'notes' => $isPermanent
+                ? 'Escalated to permanent ban threshold (multi-user IP abuse)'
+                : 'Rate limit threshold exceeded (multi-user IP abuse)',
+            'user_agent' => $userAgent,
+        ]);
+
+        if ($isPermanent) {
+            $csfStatus = $this->applyCsfBan('ip', $ipAddress);
+            $this->db->updateRateLimitIncidentCsfStatus((int)$incidentId, $csfStatus);
+        }
+
+        $this->notifyDiscordRateLimitIncident([
+            'incidentId' => (int)$incidentId,
+            'identityType' => 'ip',
+            'identityValue' => $ipAddress,
+            'userId' => $userId,
+            'ipAddress' => get_client_ip(),
+            'routeName' => $routeName,
+            'filePath' => $filePath,
+            'windowSeconds' => self::WINDOW_SECONDS,
+            'requestCount' => $requestCount,
+            'offenseLevel' => $nextOffense,
+            'blockSeconds' => $blockSeconds,
+            'blockedUntil' => $blockedUntil,
+            'isPermanent' => $isPermanent,
+            'csfStatus' => $csfStatus ?? 'not_applicable',
+            'userAgent' => $userAgent,
+        ]);
+
+        $this->setBlockState($identityKey, $blockSeconds, $isPermanent, $blockedUntil, $nextOffense);
+
+        return [
+            'blocked' => true,
+            'retryAfterSeconds' => $isPermanent ? 0 : $blockSeconds,
+            'blockedUntil' => $blockedUntil,
+            'isPermanent' => $isPermanent,
+            'reason' => $isPermanent ? 'permanent_firewall_ban' : 'rate_limit_exceeded',
+        ];
+    }
+
+    private function countRecentDistinctUsersForIp(string $ipAddress): int {
+        if ($ipAddress === '') {
+            return 0;
+        }
+
+        if ($this->redisAvailable) {
+            try {
+                $now = time();
+                $windowStart = $now - self::WINDOW_SECONDS;
+                $ipUserKey = 'rl:ipusers:' . hash('sha256', $ipAddress);
+                $this->redis->zRemRangeByScore($ipUserKey, 0, $windowStart - 1);
+                return (int)$this->redis->zCard($ipUserKey);
+            } catch (Exception $e) {
+                error_log('Rate limiter IP distinct-user read failed: ' . $e->getMessage());
+            }
+        }
+
+        return (int)$this->db->countRecentDistinctUsersByIpIdentity($this->identityKey('ip', $ipAddress), self::WINDOW_SECONDS);
+    }
+
+    private function registerIpUserActivity(string $ipAddress, string $userId): void {
+        if (!$this->redisAvailable || $ipAddress === '' || $userId === '') {
+            return;
+        }
+
+        try {
+            $now = time();
+            $windowStart = $now - self::WINDOW_SECONDS;
+            $ipUserKey = 'rl:ipusers:' . hash('sha256', $ipAddress);
+            $this->redis->zAdd($ipUserKey, $now, $userId);
+            $this->redis->zRemRangeByScore($ipUserKey, 0, $windowStart - 1);
+            $this->redis->expire($ipUserKey, self::IP_USER_ACTIVITY_TTL);
+        } catch (Exception $e) {
+            error_log('Rate limiter IP distinct-user track failed: ' . $e->getMessage());
+        }
+    }
+
+    private function recordIdentityAssociation(string $ipAddress, string $userId): void {
+        if ($ipAddress === '') {
+            return;
+        }
+
+        $path = self::IDENTITY_ASSOC_FILE;
+        $directory = dirname($path);
+        if (!is_dir($directory)) {
+            @mkdir($directory, 0755, true);
+        }
+
+        $handle = @fopen($path, 'c+');
+        if ($handle === false) {
+            return;
+        }
+
+        try {
+            if (!flock($handle, LOCK_EX)) {
+                return;
+            }
+
+            rewind($handle);
+            $raw = stream_get_contents($handle);
+            $data = json_decode($raw ?: '', true);
+            if (!is_array($data)) {
+                $data = ['ips' => []];
+            }
+            if (!isset($data['ips']) || !is_array($data['ips'])) {
+                $data['ips'] = [];
+            }
+
+            $now = time();
+            $cutoff = $now - self::IDENTITY_ASSOC_RETENTION_SECONDS;
+
+            foreach ($data['ips'] as $storedIp => $ipInfo) {
+                if (!is_array($ipInfo)) {
+                    unset($data['ips'][$storedIp]);
+                    continue;
+                }
+
+                if (!isset($ipInfo['users']) || !is_array($ipInfo['users'])) {
+                    $ipInfo['users'] = [];
+                }
+
+                foreach ($ipInfo['users'] as $storedUserId => $lastSeen) {
+                    if ((int)$lastSeen < $cutoff) {
+                        unset($ipInfo['users'][$storedUserId]);
+                    }
+                }
+
+                $ipLastSeen = isset($ipInfo['last_seen']) ? (int)$ipInfo['last_seen'] : 0;
+                if ($ipLastSeen < $cutoff && empty($ipInfo['users'])) {
+                    unset($data['ips'][$storedIp]);
+                    continue;
+                }
+
+                $data['ips'][$storedIp] = [
+                    'last_seen' => $ipLastSeen,
+                    'users' => $ipInfo['users'],
+                ];
+            }
+
+            if (!isset($data['ips'][$ipAddress]) || !is_array($data['ips'][$ipAddress])) {
+                $data['ips'][$ipAddress] = [
+                    'last_seen' => $now,
+                    'users' => [],
+                ];
+            }
+
+            $data['ips'][$ipAddress]['last_seen'] = $now;
+            if ($userId !== '') {
+                if (!isset($data['ips'][$ipAddress]['users']) || !is_array($data['ips'][$ipAddress]['users'])) {
+                    $data['ips'][$ipAddress]['users'] = [];
+                }
+                $data['ips'][$ipAddress]['users'][$userId] = $now;
+            }
+
+            $encoded = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            if ($encoded === false) {
+                flock($handle, LOCK_UN);
+                return;
+            }
+
+            rewind($handle);
+            ftruncate($handle, 0);
+            fwrite($handle, $encoded);
+            fflush($handle);
+            flock($handle, LOCK_UN);
+        } finally {
+            fclose($handle);
+        }
     }
 
     private function registerAndCountRecentRequests(string $identityKey): int {

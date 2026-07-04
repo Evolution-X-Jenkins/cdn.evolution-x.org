@@ -418,6 +418,29 @@ class Database {
         return (int)$stmt->fetchColumn();
     }
 
+    public function countRecentDistinctUsersByIpIdentity($ipIdentityKey, $windowSeconds = 60) {
+        if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+            $stmt = $this->pdo->prepare('
+                SELECT COUNT(DISTINCT user_id)
+                FROM requests
+                WHERE identity_ip_key = ?
+                  AND user_id <> ""
+                  AND created_at >= DATE_SUB(NOW(), INTERVAL ? SECOND)
+            ');
+        } else {
+            $stmt = $this->pdo->prepare("
+                SELECT COUNT(DISTINCT user_id)
+                FROM requests
+                WHERE identity_ip_key = ?
+                  AND user_id <> ''
+                  AND created_at >= datetime('now', '-' || ? || ' seconds')
+            ");
+        }
+
+        $stmt->execute([$ipIdentityKey, (int)$windowSeconds]);
+        return (int)$stmt->fetchColumn();
+    }
+
     public function createRateLimitIncident(array $incidentData) {
         $stmt = $this->pdo->prepare('
             INSERT INTO rateLimitedIncidents
