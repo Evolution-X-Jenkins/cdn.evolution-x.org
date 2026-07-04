@@ -51,8 +51,10 @@ ob_start();
     </div>
     
     <!-- Service Status Cards -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6 mb-8">
+    <?php $local_identifiers = $health_checks['local_identifiers'] ?? null; ?>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6 mb-6">
         <?php foreach ($health_checks as $key => $check): ?>
+            <?php if ($key === 'local_identifiers') { continue; } ?>
             <?php
             $card_class = 'border-green-500';
             $icon = '✅';
@@ -108,6 +110,61 @@ ob_start();
             </div>
         <?php endforeach; ?>
     </div>
+
+    <?php if ($local_identifiers): ?>
+        <?php
+        $card_class = 'border-green-500';
+        $icon = '✅';
+        $text_color = 'text-green-400';
+
+        if ($local_identifiers['status'] === 'error') {
+            $card_class = 'border-red-500';
+            $icon = '❌';
+            $text_color = 'text-red-400';
+        } elseif ($local_identifiers['status'] === 'warning') {
+            $card_class = 'border-yellow-500';
+            $icon = '⚠️';
+            $text_color = 'text-yellow-400';
+        } elseif ($local_identifiers['status'] === 'building') {
+            $card_class = 'border-blue-500';
+            $icon = '🔄';
+            $text_color = 'text-blue-400';
+        } elseif ($local_identifiers['status'] === 'idle') {
+            $card_class = 'border-gray-500';
+            $icon = '⏸️';
+            $text_color = 'text-gray-400';
+        }
+        ?>
+        <div class="bg-[#0f172a] border-2 <?php echo $card_class; ?> rounded-lg p-6 hover:shadow-lg transition-shadow mb-8">
+            <div class="flex items-center justify-between mb-4">
+                <h4 class="text-lg font-semibold text-white"><?php echo htmlspecialchars($local_identifiers['name']); ?></h4>
+                <span class="text-2xl"><?php echo $icon; ?></span>
+            </div>
+
+            <p class="<?php echo $text_color; ?> font-medium mb-3">
+                <?php echo htmlspecialchars($local_identifiers['message']); ?>
+            </p>
+
+            <?php if (!empty($local_identifiers['details'])): ?>
+                <div class="space-y-1">
+                    <?php foreach ($local_identifiers['details'] as $label => $value): ?>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-gray-400"><?php echo htmlspecialchars($label); ?>:</span>
+                            <span class="text-white" title="<?php echo htmlspecialchars($value); ?>">
+                                <?php 
+                                $display_value = $value;
+                                if (strlen($value) > 30 && (strpos($label, 'URL') !== false || filter_var($value, FILTER_VALIDATE_URL))) {
+                                    $display_value = substr($value, 0, 27) . '...';
+                                }
+                                echo htmlspecialchars($display_value); 
+                                ?>
+                            </span>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+    <?php endif; ?>
     
     <!-- Quick Actions -->
     <div class="bg-[#0f172a] border-2 border-[#0060ff] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg p-6">

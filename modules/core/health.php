@@ -7,10 +7,12 @@
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/bucket_cache.php';
 require_once __DIR__ . '/../setup/database.php';
+require_once __DIR__ . '/rate_limit.php';
 
 function show_health_page() {
     // Check various system components
     $health_checks = [
+        'local_identifiers' => check_local_identifiers(),
         'r2' => check_r2_status(),
         'jenkins' => check_jenkins_status(),
         'bucket' => check_bucket_status(),
@@ -29,6 +31,93 @@ function show_health_page() {
     }
     
     include 'templates/health.php';
+}
+
+function check_local_identifiers() {
+    $ipAddress = (string)(get_client_ip() ?? 'unknown');
+    $userId = (string)(get_user_id() ?? 'unknown');
+    $userAgent = trim((string)($_SERVER['HTTP_USER_AGENT'] ?? ''));
+
+    if ($userAgent === '') {
+        $userAgent = 'unknown';
+    }
+
+    $status = 'healthy';
+    $message = 'Request identity and download metadata';
+    $restrictionLabel = 'None';
+    $timeRemaining = '0 seconds';
+    $allowedAgain = 'Now';
+    $ruleTriggeredBy = 'n/a';
+
+    try {
+        $rateLimitState = get_download_rate_limit_status();
+        $isBlocked = !empty($rateLimitState['blocked']);
+        $isPermanent = !empty($rateLimitState['isPermanent']);
+        $retryAfterSeconds = max(0, (int)($rateLimitState['retryAfterSeconds'] ?? 0));
+        $blockedUntil = $rateLimitState['blockedUntil'] ?? null;
+        $identityType = $rateLimitState['identityType'] ?? null;
+
+        if ($isPermanent) {
+            $status = 'error';
+            $message = 'Downloads are permanently restricted';
+            $restrictionLabel = 'Permanent ban';
+            $timeRemaining = 'Permanent';
+            $allowedAgain = 'Never';
+            $ruleTriggeredBy = $identityType === 'user' ? 'userID' : 'IP';
+        } elseif ($isBlocked) {
+            $status = 'warning';
+            $message = 'Downloads are temporarily restricted';
+            $restrictionLabel = 'Temporary block';
+            $timeRemaining = format_duration_for_health($retryAfterSeconds);
+            $allowedAgain = $blockedUntil ?: 'unknown';
+            $ruleTriggeredBy = $identityType === 'user' ? 'userID' : 'IP';
+        }
+    } catch (Exception $e) {
+        $status = 'warning';
+        $message = 'Download restriction status unavailable';
+        $restrictionLabel = 'Unknown';
+        $timeRemaining = 'Unknown';
+        $allowedAgain = 'Unknown';
+    }
+
+    return [
+        'name' => 'Local Debug Info',
+        'status' => $status,
+        'message' => $message,
+        'details' => [
+            'IP' => $ipAddress,
+            'userID' => $userId,
+            'UserAgent' => $userAgent,
+            'Download Restrictions' => $restrictionLabel,
+            'Time Remaining' => $timeRemaining,
+            'Allowed Again' => $allowedAgain,
+            'Rule Triggered By' => $ruleTriggeredBy,
+            'Threshold' => 'More than 5 requests in 30 seconds'
+        ]
+    ];
+}
+
+function format_duration_for_health(int $seconds): string {
+    if ($seconds <= 0) {
+        return '0 seconds';
+    }
+
+    $hours = intdiv($seconds, 3600);
+    $minutes = intdiv($seconds % 3600, 60);
+    $remainingSeconds = $seconds % 60;
+
+    $parts = [];
+    if ($hours > 0) {
+        $parts[] = $hours . 'h';
+    }
+    if ($minutes > 0) {
+        $parts[] = $minutes . 'm';
+    }
+    if ($remainingSeconds > 0 || empty($parts)) {
+        $parts[] = $remainingSeconds . 's';
+    }
+
+    return implode(' ', $parts);
 }
 
 function check_r2_status() {

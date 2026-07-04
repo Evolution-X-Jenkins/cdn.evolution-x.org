@@ -104,6 +104,64 @@ class DownloadRateLimiter {
         ];
     }
 
+    public function getCurrentStatus(): array {
+        $userId = get_user_id();
+        $ipAddress = get_client_ip();
+
+        $activeBlocks = [];
+
+        if ($ipAddress !== '') {
+            $ipBlock = $this->getActiveBlock($this->identityKey('ip', $ipAddress));
+            if (!empty($ipBlock)) {
+                $ipBlock['identityType'] = 'ip';
+                $activeBlocks[] = $ipBlock;
+            }
+        }
+
+        if ($userId !== '') {
+            $userBlock = $this->getActiveBlock($this->identityKey('user', $userId));
+            if (!empty($userBlock)) {
+                $userBlock['identityType'] = 'user';
+                $activeBlocks[] = $userBlock;
+            }
+        }
+
+        if (empty($activeBlocks)) {
+            return [
+                'blocked' => false,
+                'retryAfterSeconds' => 0,
+                'blockedUntil' => null,
+                'isPermanent' => false,
+                'reason' => null,
+                'identityType' => null,
+            ];
+        }
+
+        usort($activeBlocks, static function ($a, $b) {
+            if (!empty($a['isPermanent']) && empty($b['isPermanent'])) {
+                return -1;
+            }
+            if (empty($a['isPermanent']) && !empty($b['isPermanent'])) {
+                return 1;
+            }
+
+            $aUntil = isset($a['blockedUntil']) && $a['blockedUntil'] !== null ? strtotime($a['blockedUntil']) : 0;
+            $bUntil = isset($b['blockedUntil']) && $b['blockedUntil'] !== null ? strtotime($b['blockedUntil']) : 0;
+            return $bUntil <=> $aUntil;
+        });
+
+        $winner = $activeBlocks[0];
+
+        return [
+            'blocked' => true,
+            'retryAfterSeconds' => (int)($winner['retryAfterSeconds'] ?? 0),
+            'blockedUntil' => $winner['blockedUntil'] ?? null,
+            'isPermanent' => !empty($winner['isPermanent']),
+            'reason' => $winner['reason'] ?? 'rate_limit_exceeded',
+            'identityType' => $winner['identityType'] ?? null,
+        ];
+    }
+
     private function evaluateIdentity(
         string $identityType,
         string $identityValue,
@@ -546,6 +604,11 @@ class DownloadRateLimiter {
 function enforce_download_rate_limit(string $routeName, string $filePath = ''): array {
     $limiter = new DownloadRateLimiter();
     return $limiter->enforce($routeName, $filePath);
+}
+
+function get_download_rate_limit_status(): array {
+    $limiter = new DownloadRateLimiter();
+    return $limiter->getCurrentStatus();
 }
 
 function render_rate_limit_429_page(array $limitState, string $routeName = ''): void {
