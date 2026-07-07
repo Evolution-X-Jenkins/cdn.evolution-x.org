@@ -736,10 +736,6 @@ class DownloadRateLimiter {
 
     private function notifyDiscordRateLimitIncident(array $incident): void {
         $config = $this->getDiscordRateLimitWebhookConfig();
-        if (!$config['enabled']) {
-            return;
-        }
-
         $isPermanent = !empty($incident['isPermanent']);
         $offenseLevel = (int)($incident['offenseLevel'] ?? 0);
         $severity = $isPermanent ? 'PERMANENT BAN' : 'Temporary Block';
@@ -755,6 +751,8 @@ class DownloadRateLimiter {
         $blockedUntilLabel = ($blockedUntilUnix !== false && $blockedUntilUnix > 0)
             ? '<t:' . $blockedUntilUnix . ':F> (<t:' . $blockedUntilUnix . ':R>)'
             : 'n/a';
+        $maskedIpAddress = $this->maskIpForInternalWebhook((string)($incident['ipAddress'] ?? 'unknown'));
+        $maskedUserId = $this->maskUserIdForInternalWebhook((string)($incident['userId'] ?? 'unknown'));
 
         $title = 'Download Rate Limit Incident - ' . $severity;
         $summaryLines = [
@@ -781,35 +779,96 @@ class DownloadRateLimiter {
             'timestamp' => gmdate('c'),
         ];
 
-        $payload = [
-            'username' => $config['username'],
-            'embeds' => [$embed],
-        ];
-
-        if ($config['avatarUrl'] !== '') {
-            $payload['avatar_url'] = $config['avatarUrl'];
-        }
-
-        if ($config['mention'] !== '') {
-            $payload['content'] = $config['mention'];
-            $payload['allowed_mentions'] = [
-                'parse' => ['users', 'roles'],
+        if ($config['enabled']) {
+            $payload = [
+                'username' => $config['username'],
+                'embeds' => [$embed],
             ];
+
+            if ($config['avatarUrl'] !== '') {
+                $payload['avatar_url'] = $config['avatarUrl'];
+            }
+
+            if ($config['mention'] !== '') {
+                $payload['content'] = $config['mention'];
+                $payload['allowed_mentions'] = [
+                    'parse' => ['users', 'roles'],
+                ];
+            }
+
+            $result = $this->sendJsonWebhookRequest($config['url'], $payload);
+            if (empty($result['sent'])) {
+                error_log('Rate limit Discord webhook failed: ' . ($result['error'] ?? 'unknown error'));
+            } else {
+                error_log('Rate limit Discord webhook sent (HTTP ' . (int)($result['httpCode'] ?? 0) . ') for incident #' . (int)($incident['incidentId'] ?? 0));
+            }
         }
 
-        $result = $this->sendJsonWebhookRequest($config['url'], $payload);
-        if (empty($result['sent'])) {
-            error_log('Rate limit Discord webhook failed: ' . ($result['error'] ?? 'unknown error'));
-            return;
-        }
+        $internalConfig = $this->getDiscordRateLimitInternalWebhookConfig();
+        if ($internalConfig['enabled']) {
+            $internalSummaryLines = [
+                '**Incident ID:** `' . (string)($incident['incidentId'] ?? 0) . '`',
+                '**Severity:** `' . $severity . '`',
+                '**Offense Level:** `' . (string)$offenseLevel . '`',
+                '**Identity Type:** `' . (string)($incident['identityType'] ?? 'unknown') . '`',
+                '**IP Address:** `' . $maskedIpAddress . '`',
+                '**User ID:** `' . $maskedUserId . '`',
+                '**File Path:** `' . (string)($incident['filePath'] ?? 'n/a') . '`',
+                '**Blocked At:** ' . $blockedAtLabel,
+                '**Block Duration:** `' . $durationLabel . '`',
+                '**Blocked Until:** ' . $blockedUntilLabel,
+                '_Additional identity details intentionally omitted._',
+            ];
 
-        error_log('Rate limit Discord webhook sent (HTTP ' . (int)($result['httpCode'] ?? 0) . ') for incident #' . (int)($incident['incidentId'] ?? 0));
+            $internalEmbed = [
+                'title' => 'Download Rate Limit Incident - Internal',
+                'description' => implode("\n\n", $internalSummaryLines),
+                'color' => $color,
+                'footer' => [
+                    'text' => 'Evolution X Rate Limit Internal'
+                ],
+                'timestamp' => gmdate('c'),
+            ];
+
+            $internalPayload = [
+                'username' => $internalConfig['username'],
+                'embeds' => [$internalEmbed],
+            ];
+
+            if ($internalConfig['avatarUrl'] !== '') {
+                $internalPayload['avatar_url'] = $internalConfig['avatarUrl'];
+            }
+
+            if ($internalConfig['mention'] !== '') {
+                $internalPayload['content'] = $internalConfig['mention'];
+                $internalPayload['allowed_mentions'] = [
+                    'parse' => ['users', 'roles'],
+                ];
+            }
+
+            $internalResult = $this->sendJsonWebhookRequest($internalConfig['url'], $internalPayload);
+            if (empty($internalResult['sent'])) {
+                error_log('Rate limit internal Discord webhook failed: ' . ($internalResult['error'] ?? 'unknown error'));
+            } else {
+                error_log('Rate limit internal Discord webhook sent (HTTP ' . (int)($internalResult['httpCode'] ?? 0) . ') for incident #' . (int)($incident['incidentId'] ?? 0));
+            }
+        }
     }
 
     private function getDiscordRateLimitWebhookConfig(): array {
         return [
             'enabled' => defined('DISCORD_RATE_LIMIT_WEBHOOK_URL') && DISCORD_RATE_LIMIT_WEBHOOK_URL !== '',
             'url' => defined('DISCORD_RATE_LIMIT_WEBHOOK_URL') ? DISCORD_RATE_LIMIT_WEBHOOK_URL : '',
+            'username' => defined('DISCORD_RATE_LIMIT_WEBHOOK_USERNAME') ? DISCORD_RATE_LIMIT_WEBHOOK_USERNAME : 'Evolution X Rate Limit Guard',
+            'avatarUrl' => defined('DISCORD_RATE_LIMIT_WEBHOOK_AVATAR_URL') ? DISCORD_RATE_LIMIT_WEBHOOK_AVATAR_URL : '',
+            'mention' => defined('DISCORD_RATE_LIMIT_WEBHOOK_MENTION') ? DISCORD_RATE_LIMIT_WEBHOOK_MENTION : '',
+        ];
+    }
+
+    private function getDiscordRateLimitInternalWebhookConfig(): array {
+        return [
+            'enabled' => defined('DISCORD_GDPR_WEBHOOK_URL') && DISCORD_GDPR_WEBHOOK_URL !== '',
+            'url' => defined('DISCORD_GDPR_WEBHOOK_URL') ? DISCORD_GDPR_WEBHOOK_URL : '',
             'username' => defined('DISCORD_RATE_LIMIT_WEBHOOK_USERNAME') ? DISCORD_RATE_LIMIT_WEBHOOK_USERNAME : 'Evolution X Rate Limit Guard',
             'avatarUrl' => defined('DISCORD_RATE_LIMIT_WEBHOOK_AVATAR_URL') ? DISCORD_RATE_LIMIT_WEBHOOK_AVATAR_URL : '',
             'mention' => defined('DISCORD_RATE_LIMIT_WEBHOOK_MENTION') ? DISCORD_RATE_LIMIT_WEBHOOK_MENTION : '',
@@ -907,6 +966,50 @@ class DownloadRateLimiter {
         }
 
         return $seconds . ' seconds';
+    }
+
+    private function maskIpForInternalWebhook(string $ipAddress): string {
+        $ipAddress = trim($ipAddress);
+        if ($ipAddress === '') {
+            return 'unknown';
+        }
+
+        if (strpos($ipAddress, '.') !== false) {
+            $parts = explode('.', $ipAddress);
+            foreach ($parts as $index => $part) {
+                if ($index >= 2) {
+                    $parts[$index] = '-';
+                }
+            }
+            return implode('.', $parts);
+        }
+
+        if (strpos($ipAddress, ':') !== false) {
+            $parts = explode(':', $ipAddress);
+            foreach ($parts as $index => $part) {
+                if ($index >= 2) {
+                    $parts[$index] = '-';
+                }
+            }
+            return implode(':', $parts);
+        }
+
+        return '-';
+    }
+
+    private function maskUserIdForInternalWebhook(string $userId): string {
+        $userId = trim($userId);
+        if ($userId === '') {
+            return 'unknown';
+        }
+
+        $visible = substr($userId, 0, 12);
+        $length = strlen($userId);
+        if ($length <= 12) {
+            return $visible;
+        }
+
+        return $visible . str_repeat('-', $length - 12);
     }
 }
 
