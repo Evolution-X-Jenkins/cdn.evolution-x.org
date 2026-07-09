@@ -98,7 +98,7 @@ function check_local_identifiers() {
 
 function format_duration_for_health(int $seconds): string {
     if ($seconds <= 0) {
-        return '0 seconds';
+        return 'n/a';
     }
 
     $hours = intdiv($seconds, 3600);
