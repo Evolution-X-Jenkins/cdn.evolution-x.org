@@ -91,8 +91,7 @@ function check_local_identifiers() {
             'Download Restrictions' => $restrictionLabel,
             'Time Remaining' => $timeRemaining,
             'Allowed Again' => $allowedAgain,
-            'Rule Triggered By' => $ruleTriggeredBy,
-            'Threshold' => 'More than 5 requests in 30 seconds'
+            'Rule Triggered By' => $ruleTriggeredBy
         ]
     ];
 }
