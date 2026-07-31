@@ -561,52 +561,61 @@ function getPushQueueJobById($db, $jobId) {
     return $stmt->fetch();
 }
 
+function logPushWorkerProgress($jobId, $message) {
+    error_log("[push-worker] Job #$jobId $message");
+}
+
 function executeQueuedPushReleaseJob($job) {
     $jobId = (int)$job['id'];
     $sourcePath = $job['source_path'];
     $destPath = $job['destination_path'];
+    $codename = trim((string)($job['codename'] ?? 'unknown'));
 
-    error_log("[push-worker] Starting push job #$jobId from $sourcePath to $destPath");
+    logPushWorkerProgress($jobId, "starting from $sourcePath to $destPath");
 
     if (!isPushSourcePathAccessible($sourcePath, 'job_' . $jobId)) {
         $message = "Source directory not found: $sourcePath";
-        error_log("[push-worker] $message");
+        logPushWorkerProgress($jobId, $message);
         return [
             'success' => false,
             'error' => $message
         ];
     }
 
+    logPushWorkerProgress($jobId, 'clearing destination hashes');
     clearHashesForPath($destPath);
 
     if (!is_dir($destPath) && !mkdir($destPath, 0755, true)) {
         $message = "Failed to create destination directory: $destPath";
-        error_log("[push-worker] $message");
+        logPushWorkerProgress($jobId, $message);
         return [
             'success' => false,
             'error' => $message
         ];
     }
 
-    $copyResult = copyRecursively($sourcePath, $destPath);
+    logPushWorkerProgress($jobId, 'beginning file copy');
+    $copyResult = copyRecursively($sourcePath, $destPath, $jobId);
     if (!$copyResult) {
         $message = "Background processing failed during file copy for job #$jobId";
-        error_log("[push-worker] $message");
+        logPushWorkerProgress($jobId, $message);
         return [
             'success' => false,
             'error' => $message
         ];
     }
 
-    if (!verifyDirectoryCopyIntegrity($sourcePath, $destPath)) {
+    logPushWorkerProgress($jobId, 'verifying copied files');
+    if (!verifyDirectoryCopyIntegrity($sourcePath, $destPath, $jobId)) {
         $message = "Background processing failed copy verification for job #$jobId";
-        error_log("[push-worker] $message");
+        logPushWorkerProgress($jobId, $message);
         return [
             'success' => false,
             'error' => $message
         ];
     }
 
+    logPushWorkerProgress($jobId, 'removing source directory');
     $cleanupResult = removeDirectoryRecursively($sourcePath);
     if (!$cleanupResult['success']) {
         $cleanupMessage = "Push completed but failed to remove pre-release source directory for job #$jobId: $sourcePath";
@@ -615,7 +624,7 @@ function executeQueuedPushReleaseJob($job) {
             $cleanupMessage .= ' | errors: ' . implode(' | ', array_slice($cleanupResult['errors'], 0, 5));
         }
 
-        error_log("[push-worker] $cleanupMessage");
+        logPushWorkerProgress($jobId, $cleanupMessage);
 
         if (shouldFailPushOnCleanupError()) {
             return [
@@ -625,10 +634,11 @@ function executeQueuedPushReleaseJob($job) {
         }
     }
 
+    logPushWorkerProgress($jobId, 'invalidating cache');
     $cache = new BucketCache();
     $cache->invalidateCache();
 
-    error_log("[push-worker] Push job #$jobId completed successfully and cache invalidated");
+    logPushWorkerProgress($jobId, 'completed successfully and cache invalidated');
 
     $result = [
         'success' => true,
@@ -920,7 +930,7 @@ function findPushQueueJobBySourcePath($db, $sourcePath) {
     return $stmt->fetch() ?: null;
 }
 
-function copyRecursively($source, $dest) {
+function copyRecursively($source, $dest, $jobId = null) {
     if (!is_dir($source)) {
         return false;
     }
@@ -931,31 +941,110 @@ function copyRecursively($source, $dest) {
         }
     }
 
+    $filesToProcess = [];
     $iterator = new RecursiveIteratorIterator(
         new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS),
         RecursiveIteratorIterator::SELF_FIRST
     );
 
     foreach ($iterator as $item) {
-        $destPath = $dest . DIRECTORY_SEPARATOR . $iterator->getSubPathName();
+        if (!$item->isFile()) {
+            continue;
+        }
 
-        if ($item->isDir()) {
-            if (!is_dir($destPath)) {
-                if (!mkdir($destPath, 0755, true) && !is_dir($destPath)) {
-                    return false;
-                }
-            }
-        } else {
-            if (!copy($item->getPathname(), $destPath)) {
+        $relativePath = $iterator->getSubPathName();
+        $filesToProcess[] = [
+            'relativePath' => $relativePath,
+            'sourcePath' => $item->getPathname(),
+            'destPath' => $dest . DIRECTORY_SEPARATOR . $relativePath,
+        ];
+    }
+
+    $fileCount = count($filesToProcess);
+    if ($jobId !== null) {
+        logPushWorkerProgress($jobId, "Processing [$fileCount] files:");
+    }
+
+    foreach ($filesToProcess as $file) {
+        $relativePath = $file['relativePath'];
+        $sourcePath = $file['sourcePath'];
+        $destPath = $file['destPath'];
+        $destDir = dirname($destPath);
+
+        if (!is_dir($destDir)) {
+            if (!mkdir($destDir, 0755, true) && !is_dir($destDir)) {
                 return false;
             }
+        }
+
+        if ($jobId !== null) {
+            $displayName = $codename . ' - ' . $relativePath;
+            logPushWorkerProgress($jobId, "- $displayName (copying 0%)");
+        }
+
+        if (!copyFileWithProgress($sourcePath, $destPath, $jobId, $relativePath)) {
+            return false;
+        }
+
+        if ($jobId !== null) {
+            $displayName = $codename . ' - ' . $relativePath;
+            logPushWorkerProgress($jobId, "- $displayName (completed)");
         }
     }
 
     return true;
 }
 
-function verifyDirectoryCopyIntegrity($source, $dest) {
+function copyFileWithProgress($sourcePath, $destPath, $jobId = null, $relativePath = null) {
+    $sourceHandle = fopen($sourcePath, 'rb');
+    if ($sourceHandle === false) {
+        return false;
+    }
+
+    $destHandle = fopen($destPath, 'wb');
+    if ($destHandle === false) {
+        fclose($sourceHandle);
+        return false;
+    }
+
+    $totalBytes = @filesize($sourcePath);
+    $totalBytes = $totalBytes !== false ? (int)$totalBytes : 0;
+    $bytesCopied = 0;
+    $lastLoggedPercent = -1;
+    $bufferSize = 1024 * 1024;
+
+    while (!feof($sourceHandle)) {
+        $chunk = fread($sourceHandle, $bufferSize);
+        if ($chunk === false || $chunk === '') {
+            break;
+        }
+
+        if (fwrite($destHandle, $chunk) === false) {
+            fclose($sourceHandle);
+            fclose($destHandle);
+            @unlink($destPath);
+            return false;
+        }
+
+        $bytesCopied += strlen($chunk);
+
+        if ($jobId !== null && $totalBytes > 0) {
+            $percent = (int)round(($bytesCopied / $totalBytes) * 100);
+            if ($percent >= $lastLoggedPercent + 5 || $percent === 100) {
+                $label = $relativePath !== null ? "- $codename - $relativePath ($percent%)" : "($percent%)";
+                logPushWorkerProgress($jobId, $label);
+                $lastLoggedPercent = $percent;
+            }
+        }
+    }
+
+    fclose($sourceHandle);
+    fclose($destHandle);
+
+    return true;
+}
+
+function verifyDirectoryCopyIntegrity($source, $dest, $jobId = null) {
     if (!is_dir($source) || !is_dir($dest)) {
         return false;
     }
@@ -963,6 +1052,8 @@ function verifyDirectoryCopyIntegrity($source, $dest) {
     $sourceIterator = new RecursiveIteratorIterator(
         new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS)
     );
+
+    $verifiedFiles = 0;
 
     foreach ($sourceIterator as $item) {
         if (!$item->isFile()) {
@@ -979,6 +1070,15 @@ function verifyDirectoryCopyIntegrity($source, $dest) {
         if (filesize($item->getPathname()) !== filesize($destPath)) {
             return false;
         }
+
+        $verifiedFiles++;
+        if ($jobId !== null && $verifiedFiles % 100 === 0) {
+            logPushWorkerProgress($jobId, "verification progress: checked $verifiedFiles files");
+        }
+    }
+
+    if ($jobId !== null) {
+        logPushWorkerProgress($jobId, "verification progress: checked $verifiedFiles files total");
     }
 
     return true;
