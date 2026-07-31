@@ -2,6 +2,46 @@
 ob_start();
 ?>
 
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const searchInput = document.getElementById('file-search');
+        if (!searchInput) {
+            return;
+        }
+
+        let typingStarted = false;
+
+        function focusSearchInput() {
+            searchInput.focus();
+            searchInput.select();
+            typingStarted = true;
+        }
+
+        document.addEventListener('keydown', function (event) {
+            const target = event.target;
+            const isTypingTarget = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+            const isModifier = event.ctrlKey || event.metaKey || event.altKey || event.shiftKey;
+            const isNavigationKey = ['Arrow', 'Tab', 'Escape', 'Enter', 'Backspace', 'Delete', 'Home', 'End', 'PageUp', 'PageDown'].some(function (key) {
+                return event.key.startsWith(key);
+            });
+
+            if (isTypingTarget || isModifier || isNavigationKey || event.key.length !== 1) {
+                return;
+            }
+
+            focusSearchInput();
+        });
+
+        searchInput.addEventListener('blur', function () {
+            typingStarted = false;
+        });
+
+        searchInput.addEventListener('focus', function () {
+            typingStarted = true;
+        });
+    });
+</script>
+
 <div class="mb-8">
     <div class="text-2xl mb-2 text-center max-w-lg mx-auto w-[300px]">
         <svg xmlns="http://www.w3.org/2000/svg" width="300" height="85" viewBox="0 0 495 85" fill="none" class="mx-auto">
@@ -22,11 +62,24 @@ ob_start();
         <h2 class="text-2xl font-normal text-white opacity-90 font-prodsans">Download Server</h2>
     </div>
 
-    <!-- Folder Path Display -->
-    <h2 class="text-lg mb-2">
-        Folder: 
-        <span class="text-blue-900"><?php echo htmlspecialchars($relative_path); ?></span>
-    </h2>
+    <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-2">
+        <h2 class="text-lg text-white">
+            Folder:
+            <span class="text-blue-900 font-medium"><?php echo htmlspecialchars($relative_path); ?></span>
+        </h2>
+
+        <form method="get" action="" class="w-full md:w-80">
+            <label for="file-search" class="sr-only">Search files</label>
+            <input
+                id="file-search"
+                name="q"
+                type="search"
+                value="<?php echo htmlspecialchars((string)($_GET['q'] ?? '')); ?>"
+                placeholder="Search files..."
+                class="w-full rounded-lg border border-[#0060ff] bg-[#0f172a] px-4 py-2 text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0060ff]"
+            >
+        </form>
+    </div>
 
 </div>
 

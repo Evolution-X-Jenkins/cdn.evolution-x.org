@@ -7,6 +7,7 @@ require_once 'modules/setup/config.php';
 
 function show_file_listing($clean_path) {
     $full_path = sanitize_path($clean_path, BASE_PATH);
+    $search_query = trim((string)($_GET['q'] ?? ''));
     
     // Get relative path for display
     $relative_path = str_replace(BASE_PATH, '', $full_path);
@@ -36,6 +37,10 @@ function show_file_listing($clean_path) {
                 'modified' => filemtime($file_path),
                 'icon' => get_file_icon($file, is_dir($file_path))
             );
+            
+            if ($search_query !== '' && stripos($file, $search_query) === false) {
+                continue;
+            }
             
             $items[] = $item;
         }
