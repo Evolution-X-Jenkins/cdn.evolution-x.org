@@ -554,6 +554,12 @@ Response format:
    
    # Push queue processing every minute
    * * * * * php /path/to/cron_push_queue.php >> /path/to/logs/push_queue.log 2>&1
+
+  # Convert yesterday's app log to CSV each day
+  5 0 * * * php /path/to/cron_daily_log_to_csv.php >> /path/to/logs/cron_csv.log 2>&1
+
+  # Archive last month's logs/csv on first day of each month
+  10 0 1 * * php /path/to/cron_archive_monthly_logs.php >> /path/to/logs/cron_archive.log 2>&1
    ```
 
 7. **Start Redis (optional but recommended):**
@@ -677,6 +683,42 @@ define('PRESIGNED_URL_EXPIRY', 3600);
 ```
 
 **Log location:** `logs/push_queue_YYYY-MM-DD.log`
+
+### Daily App Log CSV Export (cron_daily_log_to_csv.php)
+
+**Purpose:** Convert yesterday's app activity log into CSV for analysis
+
+**Frequency:** Daily (shortly after midnight)
+
+**Tasks:**
+1. Read `logs/app-YYYY-MM-DD.log` for yesterday
+2. Parse log metadata (timestamp, IP, user ID, action, path)
+3. Write `logs/app-YYYY-MM-DD.csv`
+
+**Crontab entry:**
+```cron
+5 0 * * * php /path/to/cron_daily_log_to_csv.php
+```
+
+**Output location:** `logs/app-YYYY-MM-DD.csv`
+
+### Monthly Log Archive (cron_archive_monthly_logs.php)
+
+**Purpose:** Archive previous-month log/csv files into a month-based archive directory
+
+**Frequency:** Monthly (first day of month)
+
+**Tasks:**
+1. Select top-level log/csv files in `logs/` from last month
+2. Move files into `logs/archive/YYYY-MM/`
+3. Skip files already archived
+
+**Crontab entry:**
+```cron
+10 0 1 * * php /path/to/cron_archive_monthly_logs.php
+```
+
+**Archive location:** `logs/archive/YYYY-MM/`
 
 ---
 
