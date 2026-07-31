@@ -519,6 +519,16 @@ function processNextQueuedPushReleaseJob() {
             error_log('[push-worker] Discord failure webhook failed for job #' . $jobId . ': ' . $e->getMessage());
         }
 
+        try {
+            $successDiscordWebhookResult = triggerPushSuccessDiscordWebhook($updatedJob, $runResult);
+        } catch (Throwable $e) {
+            $successDiscordWebhookResult = [
+                'sent' => false,
+                'error' => $e->getMessage()
+            ];
+            error_log('[push-worker] Discord success webhook failed for job #' . $jobId . ': ' . $e->getMessage());
+        }
+
         return [
             'success' => true,
             'status' => $runResult['success'] ? 'processed' : 'failed',
@@ -526,7 +536,8 @@ function processNextQueuedPushReleaseJob() {
             'jobSuccess' => (bool)$runResult['success'],
             'message' => $runResult['success'] ? 'Push job completed' : 'Push job failed',
             'callback' => $callbackResult,
-            'discordWebhook' => $discordWebhookResult
+            'discordWebhook' => $discordWebhookResult,
+            'successDiscordWebhook' => $successDiscordWebhookResult
         ];
     } catch (Exception $e) {
         error_log('Push queue worker error: ' . $e->getMessage());
@@ -733,6 +744,50 @@ function triggerPushCompletionCallback($db, $job, $runResult) {
     ];
 }
 
+function triggerPushSuccessDiscordWebhook($job, $runResult) {
+    if (empty($runResult['success'])) {
+        return [
+            'sent' => false,
+            'skipped' => true,
+            'reason' => 'Job failed or not successful'
+        ];
+    }
+
+    $config = getPushSuccessDiscordWebhookConfig();
+    if (!$config['enabled']) {
+        return [
+            'sent' => false,
+            'skipped' => true,
+            'reason' => 'Discord success webhook disabled or URL missing'
+        ];
+    }
+
+    $jobId = (int)($job['id'] ?? 0);
+    $codename = $job['codename'] ?? 'unknown';
+    $version = $job['version'] ?? 'unknown';
+    $releaseDate = $job['release_date'] ?? 'unknown';
+
+    $messageContent = "**CDN Push Release Success**\n";
+    $messageContent .= "Push completed successfully for {$codename} {$version} ({$releaseDate})";
+
+    $payload = [
+        'username' => $config['username'],
+        'content' => $messageContent,
+        'allowed_mentions' => [
+            'parse' => ['users']
+        ]
+    ];
+
+    if ($config['avatarUrl'] !== '') {
+        $payload['avatar_url'] = $config['avatarUrl'];
+    }
+
+    $result = sendJsonWebhookRequest($config['url'], $payload);
+    error_log('[push-worker] Discord success webhook result for job #' . $jobId . ': ' . json_encode($result));
+
+    return $result;
+}
+
 function triggerPushFailureDiscordWebhook($job, $runResult) {
     if (!empty($runResult['success'])) {
         return [
@@ -866,6 +921,19 @@ function getPushCompletionCallbackConfig() {
     return [
         'enabled' => $sendUpdate && $url !== '',
         'url' => $url
+    ];
+}
+
+function getPushSuccessDiscordWebhookConfig() {
+    $url = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_URL') ?: ''));
+    $username = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_USERNAME') ?: 'Evolution X Push Worker'));
+    $avatarUrl = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_AVATAR_URL') ?: ''));
+
+    return [
+        'enabled' => $url !== '',
+        'url' => $url,
+        'username' => $username,
+        'avatarUrl' => $avatarUrl
     ];
 }
 
