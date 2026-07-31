@@ -5,16 +5,52 @@ ob_start();
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         const searchInput = document.getElementById('file-search');
-        if (!searchInput) {
+        const listContainer = document.getElementById('file-list');
+        const emptyState = document.getElementById('file-search-empty');
+        if (!searchInput || !listContainer) {
             return;
         }
 
+        const fileItems = Array.from(listContainer.querySelectorAll('[data-file-name]'));
         let typingStarted = false;
 
         function focusSearchInput() {
             searchInput.focus();
             searchInput.select();
             typingStarted = true;
+        }
+
+        function applyLiveFilter() {
+            const query = searchInput.value.trim().toLowerCase();
+            let visibleCount = 0;
+
+            fileItems.forEach(function (item) {
+                const isPinned = item.getAttribute('data-search-pinned') === 'true';
+                if (isPinned) {
+                    item.style.display = '';
+                    return;
+                }
+
+                const name = (item.getAttribute('data-file-name') || '').toLowerCase();
+                const matches = !query || name.includes(query);
+                item.style.display = matches ? '' : 'none';
+
+                if (matches) {
+                    visibleCount++;
+                }
+            });
+
+            if (emptyState) {
+                emptyState.classList.toggle('hidden', visibleCount > 0 || !query);
+            }
+
+            const url = new URL(window.location.href);
+            if (query) {
+                url.searchParams.set('q', searchInput.value.trim());
+            } else {
+                url.searchParams.delete('q');
+            }
+            window.history.replaceState({}, '', url);
         }
 
         document.addEventListener('keydown', function (event) {
@@ -32,13 +68,20 @@ ob_start();
             focusSearchInput();
         });
 
+        searchInput.addEventListener('input', applyLiveFilter);
+        searchInput.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+            }
+        });
         searchInput.addEventListener('blur', function () {
             typingStarted = false;
         });
-
         searchInput.addEventListener('focus', function () {
             typingStarted = true;
         });
+
+        applyLiveFilter();
     });
 </script>
 
@@ -84,7 +127,7 @@ ob_start();
 </div>
 
     <!-- File listing -->
-    <div class="grid gap-4">
+    <div id="file-list" class="grid gap-4">
         <?php if ($relative_path != '/'): ?>
             <?php
             $parent_path = dirname($relative_path);
@@ -94,7 +137,7 @@ ob_start();
                 $parent_path = '/' . ltrim($parent_path, '/');
             }
             ?>
-            <div>
+            <div data-file-name=".." data-search-pinned="true">
                 <a href="<?php echo htmlspecialchars($parent_path); ?>" class="flex items-center space-x-2 text-white hover:underline border-2 border-[#0060ff] bg-[#0f172a] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg px-4 py-2 h-[50px] duration-100 ease-in hover:scale-105 hover:shadow-[0px_0px_38.5px_18px_#0060ff50]">
                     <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7M3 7l9-5 9 5" /></svg>
                     <span>...</span>
@@ -104,7 +147,7 @@ ob_start();
         
         <?php if (!empty($items)): ?>
             <?php foreach ($items as $item): ?>
-            <div>
+            <div data-file-name="<?php echo htmlspecialchars($item['name']); ?>">
                 <?php if ($item['is_dir']): ?>
                     <a href="<?php echo htmlspecialchars($item['path']); ?>" class="flex items-center space-x-2 text-white hover:underline border-2 border-[#0060ff] bg-[#0f172a] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg px-4 py-2 h-[50px] duration-100 ease-in hover:scale-105 hover:shadow-[0px_0px_38.5px_18px_#0060ff50]">
                         <?php echo get_file_icon($item['name'], true); ?>
@@ -131,6 +174,8 @@ ob_start();
             <?php endforeach; ?>
         <?php endif; ?>
         
+        <div id="file-search-empty" class="hidden text-gray-600 italic py-4">No matching files or folders.</div>
+
         <?php if (empty($items) && (!$relative_path || $relative_path == '/')): ?>
             <div class="text-gray-600 italic py-4">No files or folders.</div>
         <?php endif; ?>
