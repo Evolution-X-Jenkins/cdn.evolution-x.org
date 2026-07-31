@@ -67,7 +67,8 @@ function show_file_listing($clean_path) {
             });
         }
 
-        $cache->set($cache_key, ['items' => $items], 60);
+        // Cache the result for 4 hours (hours * minutes * seconds)
+        $cache->set($cache_key, ['items' => $items], 4 * 60 * 60);
     }
     
     $breadcrumb = generate_breadcrumb($relative_path);

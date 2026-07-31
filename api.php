@@ -18,6 +18,7 @@ require_once __DIR__ . '/modules/api/store_hashes.php';
 require_once __DIR__ . '/modules/api/download_blocks.php';
 require_once __DIR__ . '/modules/api/discord_bot.php';
 require_once __DIR__ . '/api/fetch-ota-hashes.php';
+require_once __DIR__ . '/modules/core/cache.php';
 
 // CORS headers
 function setCorsHeaders() {
@@ -155,6 +156,17 @@ function handleApiRequest() {
             
         case 'health':
             $result = handleHealthApi($method, $pathParts);
+            break;
+
+        case 'cache-refresh':
+            if ($method !== 'POST') {
+                jsonResponse(['success' => false, 'error' => 'Method not allowed'], 405);
+            }
+
+            $cache = CacheManager::getInstance();
+            $cache->clear();
+
+            $result = ['success' => true, 'message' => 'Cache cleared'];
             break;
 
         case 'discord-bot':
