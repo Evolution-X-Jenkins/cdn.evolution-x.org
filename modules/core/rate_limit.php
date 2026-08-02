@@ -739,7 +739,15 @@ class DownloadRateLimiter {
         $isPermanent = !empty($incident['isPermanent']);
         $offenseLevel = (int)($incident['offenseLevel'] ?? 0);
         $severity = $isPermanent ? 'PERMANENT BAN' : 'Temporary Block';
-        $color = $isPermanent ? 15158332 : 16753920; // Red / Orange
+        $color = 3447003; // Blue default
+
+        if ($offenseLevel >= 4 || $isPermanent) {
+            $color = 15158332; // Red
+        } elseif ($offenseLevel === 3) {
+            $color = 15105570; // Orange
+        } elseif ($offenseLevel === 2) {
+            $color = 16776960; // Yellow
+        }
 
         $durationLabel = $isPermanent
             ? 'Permanent'
