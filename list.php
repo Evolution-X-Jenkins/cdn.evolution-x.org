@@ -5,67 +5,63 @@
 
 require_once 'modules/setup/config.php';
 require_once 'modules/core/cache.php';
+require_once 'modules/core/manifest_index.php';
+require_once 'modules/setup/database.php';
 
 function show_file_listing($clean_path) {
-    $full_path = sanitize_path($clean_path, BASE_PATH);
+    $requested_path = trim((string)$clean_path);
+    $relative_path = listing_normalize_relative_path($requested_path);
     $search_query = trim((string)($_GET['q'] ?? ''));
     
-    // Get relative path for display
-    $relative_path = str_replace(BASE_PATH, '', $full_path);
-    if (empty($relative_path)) {
-        $relative_path = '/';
-    }
-    
     $cache = CacheManager::getInstance();
-    // Cache full directory listings by path only so different searches reuse the same scan result.
-    $cache_key = 'directory_listing:' . md5($full_path);
+    $cache_key = 'directory_listing_manifest:' . md5($relative_path);
     $cached_listing = $cache->get($cache_key);
 
-    if ($cached_listing !== null && isset($cached_listing['items'])) {
+    if ($cached_listing !== null && isset($cached_listing['items']) && is_array($cached_listing['items'])) {
         $items = $cached_listing['items'];
+        $listing_source = (string)($cached_listing['source'] ?? 'cache');
+        $listing_generated_at = (string)($cached_listing['generated_at'] ?? '');
     } else {
-        // Read directory contents
-        $items = array();
-        if (is_dir($full_path)) {
-            $files = scandir($full_path);
-            foreach ($files as $file) {
-                if ($file == '.' || $file == '..' || $file == '.bash_history' || $file == '.cache' || $file == '.config') {
-                    continue;
-                }
-                
-                $file_path = $full_path . '/' . $file;
-                $stat = @stat($file_path);
-                $is_dir = $stat !== false && (($stat['mode'] & 0170000) === 0040000);
-                $is_file = $stat !== false && (($stat['mode'] & 0170000) === 0100000);
-                $file_size = $is_file ? (int)$stat['size'] : 0;
-                $file_modified = $stat !== false ? (int)$stat['mtime'] : 0;
-                
-                // Build clean URL path
-                $url_path = $relative_path === '/' ? $file : ltrim($relative_path . '/' . $file, '/');
-                
-                $item = array(
-                    'name' => $file,
-                    'path' => '/' . $url_path,
-                    'is_dir' => $is_dir,
-                    'size' => $file_size,
-                    'modified' => $file_modified,
-                    'icon' => get_file_icon($file, $is_dir)
-                );
+        $items = [];
+        $listing_source = 'manifest_json';
+        $listing_generated_at = '';
 
-                $items[] = $item;
-            }
-            
-            // Sort: directories first, then files, both alphabetically
-            usort($items, function($a, $b) {
-                if ($a['is_dir'] != $b['is_dir']) {
-                    return $b['is_dir'] - $a['is_dir'];
+        $manifest_meta = [];
+        $manifest_items = listing_load_items_from_manifest($relative_path, $manifest_meta);
+        if (is_array($manifest_items)) {
+            $items = $manifest_items;
+            $listing_source = (string)($manifest_meta['source'] ?? 'manifest_json');
+            $listing_generated_at = (string)($manifest_meta['generated_at'] ?? '');
+        } else {
+            $db_items = null;
+
+            if (LISTING_ENABLE_DB_FALLBACK) {
+                try {
+                    $db_meta = [];
+                    $pdo = Database::getInstance()->getConnection();
+                    $db_items = listing_load_items_from_db($relative_path, $pdo, $db_meta);
+                    if (is_array($db_items)) {
+                        $items = $db_items;
+                        $listing_source = (string)($db_meta['source'] ?? 'manifest_db');
+                        $listing_generated_at = (string)($db_meta['generated_at'] ?? '');
+                    }
+                } catch (Exception $e) {
+                    error_log('Listing DB fallback failed: ' . $e->getMessage());
                 }
-                return strcasecmp($a['name'], $b['name']);
-            });
+            }
+
+            if (!is_array($db_items) && LISTING_ENABLE_LIVE_SCAN_FALLBACK) {
+                $items = listing_live_scan_items($relative_path);
+                $listing_source = 'live_scan';
+                $listing_generated_at = gmdate('c');
+            }
         }
 
-        // Cache the result for 4 hours (hours * minutes * seconds)
-        $cache->set($cache_key, ['items' => $items], 4 * 60 * 60);
+        $cache->set($cache_key, [
+            'items' => $items,
+            'source' => $listing_source,
+            'generated_at' => $listing_generated_at,
+        ], LISTING_MANIFEST_CACHE_TTL);
     }
 
     if ($search_query !== '') {

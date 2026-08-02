@@ -68,6 +68,19 @@ define('FALLBACK_DOMAINS', [
     'domain3.com'
 ]);
 
+// Listing manifest configuration
+define('LISTING_HIDDEN_NAMES', [
+    '.bash_history',
+    '.cache',
+    '.config',
+]);
+define('LISTING_MANIFEST_DIR', __DIR__ . '/../../data/manifests');
+define('LISTING_MANIFEST_FILE', LISTING_MANIFEST_DIR . '/current.json');
+define('LISTING_MANIFEST_STATUS_FILE', LISTING_MANIFEST_DIR . '/status.json');
+define('LISTING_MANIFEST_ARCHIVE_DIR', LISTING_MANIFEST_DIR . '/archive');
+define('LISTING_ENABLE_DB_FALLBACK', true);
+define('LISTING_ENABLE_LIVE_SCAN_FALLBACK', true);
+define('LISTING_MANIFEST_CACHE_TTL', 1800); // 30 minutes
 // Default presigned URL expiry (in seconds)
 define('PRESIGNED_URL_EXPIRY', 3600); // 1 hour
 

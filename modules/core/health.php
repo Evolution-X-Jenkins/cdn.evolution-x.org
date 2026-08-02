@@ -6,6 +6,7 @@
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/bucket_cache.php';
+require_once __DIR__ . '/manifest_index.php';
 require_once __DIR__ . '/../setup/database.php';
 require_once __DIR__ . '/rate_limit.php';
 
@@ -117,6 +118,42 @@ function format_duration_for_health(int $seconds): string {
     }
 
     return implode(' ', $parts);
+}
+
+function format_time_ago_for_health($epoch): string {
+    $ts = listing_parse_epoch($epoch);
+    if ($ts <= 0) {
+        return 'unknown';
+    }
+
+    $now = time();
+    $delta = $now - $ts;
+
+    if ($delta < 0) {
+        $delta = abs($delta);
+        if ($delta < 60) {
+            return 'in ' . $delta . ' seconds';
+        }
+        if ($delta < 3600) {
+            return 'in ' . intdiv($delta, 60) . ' minutes';
+        }
+        if ($delta < 86400) {
+            return 'in ' . intdiv($delta, 3600) . ' hours';
+        }
+        return 'in ' . intdiv($delta, 86400) . ' days';
+    }
+
+    if ($delta < 60) {
+        return $delta . ' seconds ago';
+    }
+    if ($delta < 3600) {
+        return intdiv($delta, 60) . ' minutes ago';
+    }
+    if ($delta < 86400) {
+        return intdiv($delta, 3600) . ' hours ago';
+    }
+
+    return intdiv($delta, 86400) . ' days ago';
 }
 
 function check_r2_status() {
@@ -233,6 +270,16 @@ function check_jenkins_status() {
 function check_bucket_status() {
     // Use cached bucket statistics for fast loading
     $cache = new BucketCache();
+    $manifestStatus = listing_read_status_file();
+    $manifestGenerated = 0;
+    $manifestState = 'Unknown';
+    $manifestUpdatedDisplay = 'unknown';
+
+    if (is_array($manifestStatus)) {
+        $manifestGenerated = listing_parse_epoch($manifestStatus['generated_at'] ?? 0);
+        $manifestState = (string)($manifestStatus['status'] ?? 'Unknown');
+        $manifestUpdatedDisplay = format_time_ago_for_health($manifestGenerated);
+    }
     
     // Check if cache exists first
     $cached = $cache->readCache();
@@ -247,7 +294,9 @@ function check_bucket_status() {
             'details' => [
                 'Total Files' => number_format($stats['total_files']),
                 'Total Size' => format_file_size($stats['total_size']),
-                'Directory' => $stats['path']
+                'Directory' => $stats['path'],
+                'Manifest Status' => $manifestState,
+                'Manifest Updated' => $manifestUpdatedDisplay
             ]
         ];
     } elseif ($cached) {
@@ -260,7 +309,9 @@ function check_bucket_status() {
             'details' => [
                 'Total Files' => number_format($stats['total_files']) . ' (stale)',
                 'Total Size' => format_file_size($stats['total_size']) . ' (stale)',
-                'Directory' => $stats['path']
+                'Directory' => $stats['path'],
+                'Manifest Status' => $manifestState,
+                'Manifest Updated' => $manifestUpdatedDisplay
             ]
         ];
     } else {
@@ -271,7 +322,9 @@ function check_bucket_status() {
             'message' => 'Calculating... (check back in a few minutes)',
             'details' => [
                 'Directory' => BASE_PATH,
-                'Note' => 'Initial calculation in progress via cron job'
+                'Note' => 'Initial calculation in progress via cron job',
+                'Manifest Status' => $manifestState,
+                'Manifest Updated' => $manifestUpdatedDisplay
             ]
         ];
     }

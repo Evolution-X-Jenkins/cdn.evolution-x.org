@@ -7,6 +7,7 @@
 require_once 'modules/setup/config.php';
 require_once 'modules/setup/database.php';
 require_once 'modules/core/rate_limit.php';
+require_once 'modules/core/manifest_index.php';
 
 // Initialize database
 $db = Database::getInstance();
@@ -111,7 +112,19 @@ if (preg_match('/^(.+?)\/download$/', $clean_path, $matches)) {
 // Bare file URLs (e.g. /folder/file.zip) should open the countdown page.
 if (!$is_download && !$is_download_page && !$is_direct_download && !$is_proxy_download && !$is_stats && $clean_path !== '') {
     $resolved_path = sanitize_path($clean_path, BASE_PATH);
-    if (is_file($resolved_path)) {
+    $isManifestFile = false;
+
+    if (!is_file($resolved_path)) {
+        try {
+            $manifestMeta = [];
+            $manifestEntry = listing_lookup_path_metadata('/' . ltrim($clean_path, '/'), $db->getConnection(), $manifestMeta);
+            $isManifestFile = is_array($manifestEntry) && empty($manifestEntry['is_dir']);
+        } catch (Exception $e) {
+            $isManifestFile = false;
+        }
+    }
+
+    if (is_file($resolved_path) || $isManifestFile) {
         $is_download_page = true;
         $target_file = $clean_path;
         $clean_path = dirname($target_file);
@@ -126,7 +139,18 @@ if ($is_download_page) {
     require_once 'modules/core/download.php';
     $file_path = sanitize_path($target_file, BASE_PATH);
     $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
-    if (is_file($file_path)) {
+    $manifestFileMeta = null;
+
+    if (!is_file($file_path)) {
+        try {
+            $lookupMeta = [];
+            $manifestFileMeta = listing_lookup_path_metadata('/' . ltrim($target_file, '/'), $db->getConnection(), $lookupMeta);
+        } catch (Exception $e) {
+            $manifestFileMeta = null;
+        }
+    }
+
+    if (is_file($file_path) || (is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir']))) {
         // Allow automated clients to bypass the countdown page.
         $allowedAgents = ['evoxupdater', 'evox updater', 'wget', 'curl', 'aria2', 'php'];
         $userAgentLower = strtolower($userAgent);
@@ -155,7 +179,7 @@ if ($is_download_page) {
         $userId = get_user_id();
         $ipAddress = $_SERVER['REMOTE_ADDR'] ?? '';
         $referer = $_SERVER['HTTP_REFERER'] ?? '';
-        $fileSize = filesize($file_path);
+        $fileSize = is_file($file_path) ? filesize($file_path) : (int)($manifestFileMeta['size'] ?? 0);
 
         try {
             $db->recordDownload($target_file, $userId, $ipAddress, $userAgent, $referer, $fileSize);
@@ -163,7 +187,7 @@ if ($is_download_page) {
             error_log('Failed to record download: ' . $e->getMessage());
         }
 
-        show_download_page($target_file, $file_path);
+        show_download_page($target_file, $file_path, $fileSize ?: null);
         exit;
     } else {
         log_action('Download failed - file not found', $target_file);
@@ -208,7 +232,17 @@ function DownloadRom($target_file, $proxy) {
     }
 
     $file_path = sanitize_path($target_file, BASE_PATH);
-    if (is_file($file_path)) {
+    $manifestFileMeta = null;
+    if (!is_file($file_path)) {
+        try {
+            $lookupMeta = [];
+            $manifestFileMeta = listing_lookup_path_metadata('/' . ltrim($target_file, '/'), $db->getConnection(), $lookupMeta);
+        } catch (Exception $e) {
+            $manifestFileMeta = null;
+        }
+    }
+
+    if (is_file($file_path) || (is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir']))) {
         log_action('Direct download requested', $target_file);
 
         // Record download statistics for direct/proxy delivery paths.
@@ -216,7 +250,7 @@ function DownloadRom($target_file, $proxy) {
         $ipAddress = $_SERVER['REMOTE_ADDR'] ?? '';
         $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
         $referer = $_SERVER['HTTP_REFERER'] ?? '';
-        $fileSize = filesize($file_path);
+        $fileSize = is_file($file_path) ? filesize($file_path) : (int)($manifestFileMeta['size'] ?? 0);
 
         try {
             $db->recordDownload($target_file, $userId, $ipAddress, $userAgent, $referer, $fileSize);

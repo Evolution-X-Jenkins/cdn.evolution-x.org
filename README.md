@@ -663,6 +663,30 @@ define('PRESIGNED_URL_EXPIRY', 3600);
 
 **Log location:** `logs/cron_YYYY-MM-DD.log`
 
+### Listing Manifest Builder (cron_manifest_index.php)
+
+**Purpose:** Build strict listing manifests used by file browser pages
+
+**Frequency:** Every 30 minutes
+
+**Tasks:**
+1. Scan filesystem under `BASE_PATH`
+2. Build nested JSON manifest with `path`, `modified_at`, and `first_seen_at`
+3. Publish manifest atomically
+4. Archive previous manifest snapshot to `data/manifests/archive/`
+5. Mirror manifest entries into `listing_manifest_entries` database table for fallback
+
+**Crontab entry:**
+```cron
+*/30 * * * * php /path/to/cron_manifest_index.php
+```
+
+**Primary output:** `data/manifests/current.json`
+
+**Status file:** `data/manifests/status.json`
+
+**Log location:** `logs/cron_manifest_index_YYYY-MM-DD.log`
+
 ### Push Queue Worker (cron_push_queue.php)
 
 **Purpose:** Process queued ROM release deployments
