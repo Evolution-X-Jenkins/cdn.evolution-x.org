@@ -5,6 +5,44 @@
 
 require_once __DIR__ . '/../setup/config.php';
 
+// Backward compatibility: if config.php has not yet been updated with listing
+// manifest constants, provide safe defaults to avoid fatal errors.
+if (!defined('LISTING_HIDDEN_NAMES')) {
+    define('LISTING_HIDDEN_NAMES', [
+        '.bash_history',
+        '.cache',
+        '.config',
+    ]);
+}
+
+if (!defined('LISTING_MANIFEST_DIR')) {
+    define('LISTING_MANIFEST_DIR', __DIR__ . '/../../data/manifests');
+}
+
+if (!defined('LISTING_MANIFEST_FILE')) {
+    define('LISTING_MANIFEST_FILE', LISTING_MANIFEST_DIR . '/current.json');
+}
+
+if (!defined('LISTING_MANIFEST_STATUS_FILE')) {
+    define('LISTING_MANIFEST_STATUS_FILE', LISTING_MANIFEST_DIR . '/status.json');
+}
+
+if (!defined('LISTING_MANIFEST_ARCHIVE_DIR')) {
+    define('LISTING_MANIFEST_ARCHIVE_DIR', LISTING_MANIFEST_DIR . '/archive');
+}
+
+if (!defined('LISTING_ENABLE_DB_FALLBACK')) {
+    define('LISTING_ENABLE_DB_FALLBACK', true);
+}
+
+if (!defined('LISTING_ENABLE_LIVE_SCAN_FALLBACK')) {
+    define('LISTING_ENABLE_LIVE_SCAN_FALLBACK', true);
+}
+
+if (!defined('LISTING_MANIFEST_CACHE_TTL')) {
+    define('LISTING_MANIFEST_CACHE_TTL', 1800);
+}
+
 function listing_parse_epoch($value) {
     if (is_int($value)) {
         return $value;
