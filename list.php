@@ -17,7 +17,8 @@ function show_file_listing($clean_path) {
     }
     
     $cache = CacheManager::getInstance();
-    $cache_key = 'directory_listing:' . md5($full_path . '|' . $search_query);
+    // Cache full directory listings by path only so different searches reuse the same scan result.
+    $cache_key = 'directory_listing:' . md5($full_path);
     $cached_listing = $cache->get($cache_key);
 
     if ($cached_listing !== null && isset($cached_listing['items'])) {
@@ -50,11 +51,7 @@ function show_file_listing($clean_path) {
                     'modified' => $file_modified,
                     'icon' => get_file_icon($file, $is_dir)
                 );
-                
-                if ($search_query !== '' && stripos($file, $search_query) === false) {
-                    continue;
-                }
-                
+
                 $items[] = $item;
             }
             
@@ -69,6 +66,12 @@ function show_file_listing($clean_path) {
 
         // Cache the result for 4 hours (hours * minutes * seconds)
         $cache->set($cache_key, ['items' => $items], 4 * 60 * 60);
+    }
+
+    if ($search_query !== '') {
+        $items = array_values(array_filter($items, function($item) use ($search_query) {
+            return stripos($item['name'], $search_query) !== false;
+        }));
     }
     
     $breadcrumb = generate_breadcrumb($relative_path);

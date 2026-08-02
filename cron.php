@@ -49,13 +49,20 @@ log_message("Starting cron job");
 // 1. Update bucket cache
 log_message("Checking bucket cache...");
 try {
-    $cache = new BucketCache();
-    $result = $cache->updateCacheInBackground();
-    
-    if ($result) {
-        log_message("Bucket cache updated successfully");
+    $allowRemoteScan = env_bool('ENABLE_BUCKET_CACHE_SCAN_ON_REMOTE', false);
+    $remoteMount = is_remote_mount_path(BASE_PATH);
+
+    if ($remoteMount && !$allowRemoteScan) {
+        log_message("Bucket cache update skipped (remote mount detected; set ENABLE_BUCKET_CACHE_SCAN_ON_REMOTE=true to override)");
     } else {
-        log_message("Bucket cache update skipped (no changes detected or already running)");
+        $cache = new BucketCache();
+        $result = $cache->updateCacheInBackground();
+
+        if ($result) {
+            log_message("Bucket cache updated successfully");
+        } else {
+            log_message("Bucket cache update skipped (no changes detected or already running)");
+        }
     }
 } catch (Exception $e) {
     log_message("ERROR: Bucket cache update failed: " . $e->getMessage());

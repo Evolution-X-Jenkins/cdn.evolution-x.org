@@ -66,6 +66,7 @@ function parse_hash_args($argv) {
         'dryRun' => false,
         'limit' => 0,
         'path' => '',
+        'allowRemoteScan' => false,
     ];
 
     foreach (array_slice($argv, 1) as $arg) {
@@ -82,6 +83,11 @@ function parse_hash_args($argv) {
 
         if (strpos($arg, '--path=') === 0) {
             $options['path'] = trim(substr($arg, 7), '/');
+            continue;
+        }
+
+        if ($arg === '--allow-remote-scan') {
+            $options['allowRemoteScan'] = true;
             continue;
         }
     }
@@ -156,7 +162,32 @@ hash_log('Stage: initialization');
 hash_log('Lock file: ' . $lockFile);
 hash_log('Scan root: ' . $scanRoot);
 hash_log('Dry run: ' . ($options['dryRun'] ? 'yes' : 'no'));
-hash_log('Limit: ' . ($options['limit'] > 0 ? $options['limit'] : 'none'));
+
+$remoteMount = is_remote_mount_path($scanRoot);
+$allowRemoteScan = $options['allowRemoteScan'] || env_bool('ENABLE_HASH_SCAN_ON_REMOTE', false);
+
+if ($remoteMount && !$allowRemoteScan) {
+    hash_log('SKIP: Remote mount detected; refusing full-tree hash scan. Set ENABLE_HASH_SCAN_ON_REMOTE=true or pass --allow-remote-scan to override.');
+    release_hash_lock($lockHandle);
+    exit(0);
+}
+
+$effectiveLimit = (int)$options['limit'];
+if ($effectiveLimit <= 0) {
+    if ($remoteMount) {
+        // Sensible safety cap for remote mounts to avoid accidental full scans.
+        $effectiveLimit = (int)getenv('CRON_HASHES_DEFAULT_LIMIT');
+        if ($effectiveLimit <= 0) {
+            $effectiveLimit = 2000;
+        }
+    } else {
+        $effectiveLimit = 0;
+    }
+}
+
+hash_log('Limit: ' . ($effectiveLimit > 0 ? $effectiveLimit : 'none'));
+hash_log('Remote mount: ' . ($remoteMount ? 'yes' : 'no'));
+hash_log('Remote scan override: ' . ($allowRemoteScan ? 'yes' : 'no'));
 
 $startTime = microtime(true);
 
@@ -222,8 +253,8 @@ try {
             continue;
         }
 
-        if ($options['limit'] > 0 && $stats['scanned'] >= $options['limit']) {
-            hash_log('Limit reached (' . $options['limit'] . '), stopping scan');
+        if ($effectiveLimit > 0 && $stats['scanned'] >= $effectiveLimit) {
+            hash_log('Limit reached (' . $effectiveLimit . '), stopping scan');
             break;
         }
 
