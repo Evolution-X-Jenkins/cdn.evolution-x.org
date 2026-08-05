@@ -17,6 +17,75 @@ if (isset($_SERVER['HTTP_HOST'])) {
 require_once __DIR__ . '/modules/setup/config.php';
 require_once __DIR__ . '/modules/setup/database.php';
 
+function cron_env_bool($name, $default = false) {
+    if (function_exists('env_bool')) {
+        return env_bool($name, $default);
+    }
+
+    $raw = getenv($name);
+    if ($raw === false || trim((string)$raw) === '') {
+        return $default;
+    }
+
+    return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+}
+
+function cron_is_remote_mount_path($path) {
+    if (function_exists('is_remote_mount_path')) {
+        return is_remote_mount_path($path);
+    }
+
+    $resolvedPath = realpath($path);
+    if ($resolvedPath === false) {
+        $resolvedPath = $path;
+    }
+
+    $mounts = @file('/proc/mounts', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($mounts === false) {
+        return false;
+    }
+
+    $bestMatch = null;
+    $bestLength = -1;
+
+    foreach ($mounts as $line) {
+        $parts = preg_split('/\s+/', trim($line));
+        if (!is_array($parts) || count($parts) < 3) {
+            continue;
+        }
+
+        $mountPoint = str_replace('\\040', ' ', $parts[1]);
+        $fsType = strtolower($parts[2]);
+
+        if ($mountPoint === '/') {
+            continue;
+        }
+
+        $matches = ($resolvedPath === $mountPoint) || (strpos($resolvedPath, rtrim($mountPoint, '/') . '/') === 0);
+        if (!$matches) {
+            continue;
+        }
+
+        $len = strlen($mountPoint);
+        if ($len > $bestLength) {
+            $bestLength = $len;
+            $bestMatch = $fsType;
+        }
+    }
+
+    if ($bestMatch === null) {
+        return false;
+    }
+
+    return (
+        strpos($bestMatch, 'fuse.rclone') !== false ||
+        strpos($bestMatch, 'rclone') !== false ||
+        strpos($bestMatch, 's3fs') !== false ||
+        strpos($bestMatch, 'goofys') !== false ||
+        strpos($bestMatch, 'fuse.s3fs') !== false
+    );
+}
+
 $logsDir = __DIR__ . '/logs';
 if (!is_dir($logsDir)) {
     @mkdir($logsDir, 0755, true);
@@ -163,8 +232,8 @@ hash_log('Lock file: ' . $lockFile);
 hash_log('Scan root: ' . $scanRoot);
 hash_log('Dry run: ' . ($options['dryRun'] ? 'yes' : 'no'));
 
-$remoteMount = is_remote_mount_path($scanRoot);
-$allowRemoteScan = $options['allowRemoteScan'] || env_bool('ENABLE_HASH_SCAN_ON_REMOTE', false);
+$remoteMount = cron_is_remote_mount_path($scanRoot);
+$allowRemoteScan = $options['allowRemoteScan'] || cron_env_bool('ENABLE_HASH_SCAN_ON_REMOTE', false);
 
 if ($remoteMount && !$allowRemoteScan) {
     hash_log('SKIP: Remote mount detected; refusing full-tree hash scan. Set ENABLE_HASH_SCAN_ON_REMOTE=true or pass --allow-remote-scan to override.');

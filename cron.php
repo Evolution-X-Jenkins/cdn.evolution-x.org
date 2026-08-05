@@ -12,9 +12,79 @@ if (isset($_SERVER['HTTP_HOST'])) {
     die('This script can only be run from command line');
 }
 
+require_once __DIR__ . '/modules/setup/config.php';
 require_once __DIR__ . '/modules/core/bucket_cache.php';
 require_once __DIR__ . '/modules/setup/database.php';
 require_once __DIR__ . '/modules/core/cache.php';
+
+function cron_env_bool($name, $default = false) {
+    if (function_exists('env_bool')) {
+        return env_bool($name, $default);
+    }
+
+    $raw = getenv($name);
+    if ($raw === false || trim((string)$raw) === '') {
+        return $default;
+    }
+
+    return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+}
+
+function cron_is_remote_mount_path($path) {
+    if (function_exists('is_remote_mount_path')) {
+        return is_remote_mount_path($path);
+    }
+
+    $resolvedPath = realpath($path);
+    if ($resolvedPath === false) {
+        $resolvedPath = $path;
+    }
+
+    $mounts = @file('/proc/mounts', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($mounts === false) {
+        return false;
+    }
+
+    $bestMatch = null;
+    $bestLength = -1;
+
+    foreach ($mounts as $line) {
+        $parts = preg_split('/\s+/', trim($line));
+        if (!is_array($parts) || count($parts) < 3) {
+            continue;
+        }
+
+        $mountPoint = str_replace('\\040', ' ', $parts[1]);
+        $fsType = strtolower($parts[2]);
+
+        if ($mountPoint === '/') {
+            continue;
+        }
+
+        $matches = ($resolvedPath === $mountPoint) || (strpos($resolvedPath, rtrim($mountPoint, '/') . '/') === 0);
+        if (!$matches) {
+            continue;
+        }
+
+        $len = strlen($mountPoint);
+        if ($len > $bestLength) {
+            $bestLength = $len;
+            $bestMatch = $fsType;
+        }
+    }
+
+    if ($bestMatch === null) {
+        return false;
+    }
+
+    return (
+        strpos($bestMatch, 'fuse.rclone') !== false ||
+        strpos($bestMatch, 'rclone') !== false ||
+        strpos($bestMatch, 's3fs') !== false ||
+        strpos($bestMatch, 'goofys') !== false ||
+        strpos($bestMatch, 'fuse.s3fs') !== false
+    );
+}
 
 // Setup logging and cache directory
 $logsDir = __DIR__ . '/logs';
@@ -49,8 +119,8 @@ log_message("Starting cron job");
 // 1. Update bucket cache
 log_message("Checking bucket cache...");
 try {
-    $allowRemoteScan = env_bool('ENABLE_BUCKET_CACHE_SCAN_ON_REMOTE', false);
-    $remoteMount = is_remote_mount_path(BASE_PATH);
+    $allowRemoteScan = cron_env_bool('ENABLE_BUCKET_CACHE_SCAN_ON_REMOTE', false);
+    $remoteMount = cron_is_remote_mount_path(BASE_PATH);
 
     if ($remoteMount && !$allowRemoteScan) {
         log_message("Bucket cache update skipped (remote mount detected; set ENABLE_BUCKET_CACHE_SCAN_ON_REMOTE=true to override)");
