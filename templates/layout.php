@@ -118,6 +118,7 @@
             <div class="fixed left-0 right-0 z-50 flex h-full flex-col items-center justify-center gap-8 rounded-2xl bg-transparent text-2xl text-[#A9A9A9] duration-300 ease-in-out md:static md:flex-row md:bg-transparent md:pl-0 md:pt-0 md:text-[1rem] md:backdrop-blur-0 lg:gap-14 top-[-2500px]">
                 <a href="/stats" class="relative transition-colors duration-300 hover:text-[#0060ff]">STATS</a>
                 <a href="/health" class="relative transition-colors duration-300 hover:text-[#0060ff]">HEALTH</a>
+                <a href="#" onclick="event.preventDefault(); showCookieDetails();" class="relative transition-colors duration-300 hover:text-[#0060ff]">PRIVACY</a>
             </div>
         </div>
     </nav>
