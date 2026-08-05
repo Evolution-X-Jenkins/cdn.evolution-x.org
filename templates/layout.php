@@ -240,6 +240,19 @@
                             </div>
                         </div>
                     </div>
+
+                    <div class="bg-[#0a161a] rounded-lg p-4 border border-cyan-500/20">
+                        <h3 class="text-cyan-400 font-prodsansbold text-lg mb-2">First-Party Cookies</h3>
+                        <p class="text-gray-300 text-sm mb-3">These cookies are set directly by this website to support core functionality and abuse prevention.</p>
+
+                        <div class="space-y-3">
+                            <div class="border-l-2 border-cyan-500/50 pl-3">
+                                <h4 class="text-white font-prodsansbold text-sm">user_id</h4>
+                                <p class="text-gray-400 text-xs">Stores a random, anonymous identifier used for request tracking and rate-limit protection. It is not used to identify you personally.</p>
+                                <p class="text-gray-500 text-xs mt-1">Duration: 1 year (HttpOnly)</p>
+                            </div>
+                        </div>
+                    </div>
                     
                     <div class="bg-[#1a0a1a] rounded-lg p-4 border border-purple-500/20">
                         <h3 class="text-purple-400 font-prodsansbold text-lg mb-2">Analytics Cookies</h3>
