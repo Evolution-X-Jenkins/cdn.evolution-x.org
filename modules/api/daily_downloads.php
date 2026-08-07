@@ -37,13 +37,15 @@ function handleDailyDownloadsApi($method, $pathParts) {
             return $cachedResponse;
         }
         
+        $isMysql = defined('DB_TYPE') && DB_TYPE === 'mysql';
+        $filePathExpr = $isMysql
+            ? 'CASE WHEN folder = "" OR folder IS NULL THEN filename ELSE CONCAT(folder, "/", filename) END'
+            : 'CASE WHEN folder = "" OR folder IS NULL THEN filename ELSE folder || "/" || filename END';
+
         // Query download statistics for the specific date
         $stmt = $db->getConnection()->prepare('
             SELECT 
-                CASE 
-                    WHEN folder = "" OR folder IS NULL THEN filename
-                    ELSE folder || "/" || filename
-                END as file_path,
+                ' . $filePathExpr . ' as file_path,
                 COUNT(*) as downloads
             FROM download_stats 
             WHERE DATE(download_time) = ?
@@ -69,10 +71,7 @@ function handleDailyDownloadsApi($method, $pathParts) {
         // Get additional statistics
         $stmt = $db->getConnection()->prepare('
             SELECT 
-                COUNT(DISTINCT CASE 
-                    WHEN folder = "" OR folder IS NULL THEN filename
-                    ELSE folder || "/" || filename
-                END) as unique_files,
+                COUNT(DISTINCT ' . $filePathExpr . ') as unique_files,
                 COUNT(*) as total_download_events
             FROM download_stats 
             WHERE DATE(download_time) = ?
@@ -124,21 +123,37 @@ function handleDailyDownloadsSummaryApi($method, $pathParts) {
             return $cachedResponse;
         }
         
-        $stmt = $db->getConnection()->prepare('
-            SELECT 
-                DATE(download_time) as date,
-                COUNT(DISTINCT CASE 
-                    WHEN folder = "" OR folder IS NULL THEN filename
-                    ELSE folder || "/" || filename
-                END) as unique_files,
-                COUNT(*) as total_downloads
-            FROM download_stats 
-            WHERE DATE(download_time) >= DATE("now", "-' . $days . ' days")
-            GROUP BY DATE(download_time)
-            ORDER BY date DESC
-        ');
-        
-        $stmt->execute();
+        $isMysql = defined('DB_TYPE') && DB_TYPE === 'mysql';
+        $filePathExpr = $isMysql
+            ? 'CASE WHEN folder = "" OR folder IS NULL THEN filename ELSE CONCAT(folder, "/", filename) END'
+            : 'CASE WHEN folder = "" OR folder IS NULL THEN filename ELSE folder || "/" || filename END';
+
+        if ($isMysql) {
+            $startDate = date('Y-m-d', strtotime('-' . $days . ' days'));
+            $stmt = $db->getConnection()->prepare('
+                SELECT 
+                    DATE(download_time) as date,
+                    COUNT(DISTINCT ' . $filePathExpr . ') as unique_files,
+                    COUNT(*) as total_downloads
+                FROM download_stats 
+                WHERE DATE(download_time) >= ?
+                GROUP BY DATE(download_time)
+                ORDER BY date DESC
+            ');
+            $stmt->execute([$startDate]);
+        } else {
+            $stmt = $db->getConnection()->prepare('
+                SELECT 
+                    DATE(download_time) as date,
+                    COUNT(DISTINCT ' . $filePathExpr . ') as unique_files,
+                    COUNT(*) as total_downloads
+                FROM download_stats 
+                WHERE DATE(download_time) >= DATE("now", "-' . $days . ' days")
+                GROUP BY DATE(download_time)
+                ORDER BY date DESC
+            ');
+            $stmt->execute();
+        }
         $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
         
         // Format results
