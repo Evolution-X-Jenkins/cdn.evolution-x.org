@@ -6,17 +6,70 @@
 
 require_once 'modules/setup/config.php';
 require_once 'modules/setup/database.php';
+require_once 'modules/setup/bunny_storage.php';
 require_once 'modules/core/file_operations.php';
 require_once 'modules/core/cache.php';
+require_once 'modules/core/manifest_index.php';
 
 function show_info_page($relative_file_path, $full_file_path) {
     $db = Database::getInstance();
     $hasher = new FileHasher();
     // Get file information
     $file_name = basename($relative_file_path);
-    $file_size = filesize($full_file_path);
+    $file_size = 0;
+    $file_modified = 0;
+
+    if (is_file($full_file_path)) {
+        $file_size = (int)filesize($full_file_path);
+        $file_modified = (int)filemtime($full_file_path);
+    } else {
+        try {
+            $lookupMeta = [];
+            $manifestEntry = listing_lookup_path_metadata('/' . ltrim($relative_file_path, '/'), $db->getConnection(), $lookupMeta);
+            if (is_array($manifestEntry) && empty($manifestEntry['is_dir'])) {
+                $file_size = (int)($manifestEntry['size'] ?? 0);
+                $file_modified = (int)($manifestEntry['modified_at'] ?? 0);
+            }
+        } catch (Exception $e) {
+            error_log('Stats metadata lookup failed for manifest entry ' . $relative_file_path . ': ' . $e->getMessage());
+        }
+
+        // If manifest is stale/missing, query Bunny parent listing for basic metadata.
+        if ($file_size <= 0 || $file_modified <= 0) {
+            try {
+                $normalizedPath = bunny_normalize_relative_path('/' . ltrim((string)$relative_file_path, '/'));
+                $parentPath = dirname($normalizedPath);
+                if ($parentPath === '.' || $parentPath === '') {
+                    $parentPath = '/';
+                }
+                if ($parentPath[0] !== '/') {
+                    $parentPath = '/' . $parentPath;
+                }
+
+                $targetName = basename($normalizedPath);
+                $items = bunny_list_directory_items($parentPath);
+                foreach ($items as $item) {
+                    if (!is_array($item)) {
+                        continue;
+                    }
+
+                    if ((string)($item['name'] ?? '') === $targetName && empty($item['is_dir'])) {
+                        $file_size = (int)($item['size'] ?? $file_size);
+                        $file_modified = (int)($item['modified_at'] ?? $file_modified);
+                        break;
+                    }
+                }
+            } catch (Throwable $e) {
+                error_log('Stats metadata lookup failed for Bunny item ' . $relative_file_path . ': ' . $e->getMessage());
+            }
+        }
+    }
+
+    if ($file_modified <= 0) {
+        $file_modified = time();
+    }
+
     $file_size_formatted = format_file_size($file_size);
-    $file_modified = filemtime($full_file_path);
     $file_modified_formatted = date('Y-m-d H:i:s', $file_modified);
     
     // Get parent directory for back navigation

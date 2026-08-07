@@ -320,7 +320,23 @@ function DownloadRom($target_file, $proxy) {
 if ($is_stats) {
     require_once 'info.php';
     $file_path = sanitize_path($target_file, BASE_PATH);
-    if (is_file($file_path)) {
+    $manifestFileMeta = null;
+    $isBunnyFile = false;
+
+    if (!is_file($file_path)) {
+        try {
+            $lookupMeta = [];
+            $manifestFileMeta = listing_lookup_path_metadata('/' . ltrim($target_file, '/'), $db->getConnection(), $lookupMeta);
+        } catch (Exception $e) {
+            $manifestFileMeta = null;
+        }
+
+        if (!(is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir']))) {
+            $isBunnyFile = is_bunny_file_path($target_file);
+        }
+    }
+
+    if (is_file($file_path) || (is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir'])) || $isBunnyFile) {
         log_action('File stats accessed', $target_file);
         show_info_page($target_file, $file_path);
         exit;
