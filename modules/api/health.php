@@ -5,6 +5,7 @@
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
+require_once __DIR__ . '/../setup/bunny_storage.php';
 require_once __DIR__ . '/../core/health.php';
 
 function handleHealthApi($method, $pathParts) {
@@ -37,13 +38,15 @@ function performHealthChecks() {
         ];
     }
     
-    // Filesystem check
+    // Local filesystem check (informational in Bunny-backed deployments).
+    $baseReadable = is_readable(BASE_PATH);
+    $baseWritable = is_writable(BASE_PATH);
     $checks['filesystem'] = [
-        'status' => is_readable(BASE_PATH) && is_writable(BASE_PATH) ? 'healthy' : 'error',
-        'message' => is_readable(BASE_PATH) && is_writable(BASE_PATH) ? 'Filesystem accessible' : 'Filesystem access issues',
+        'status' => ($baseReadable && $baseWritable) ? 'healthy' : 'warning',
+        'message' => ($baseReadable && $baseWritable) ? 'Local filesystem accessible' : 'Local filesystem limited (Bunny-backed mode may still be healthy)',
         'base_path' => BASE_PATH,
-        'readable' => is_readable(BASE_PATH),
-        'writable' => is_writable(BASE_PATH)
+        'readable' => $baseReadable,
+        'writable' => $baseWritable
     ];
     
     // Pre-release path check
@@ -57,21 +60,37 @@ function performHealthChecks() {
         ];
     }
     
-    // R2 configuration check
-    if (defined('R2_ENABLED') && R2_ENABLED) {
-        $checks['r2'] = [
-            'status' => (getenv('R2_ACCOUNT_ID') && getenv('R2_ACCESS_KEY_ID') && getenv('R2_SECRET_ACCESS_KEY')) ? 'healthy' : 'error',
-            'message' => (getenv('R2_ACCOUNT_ID') && getenv('R2_ACCESS_KEY_ID') && getenv('R2_SECRET_ACCESS_KEY')) ? 'R2 configuration present' : 'R2 configuration missing',
-            'configured' => (getenv('R2_ACCOUNT_ID') && getenv('R2_ACCESS_KEY_ID') && getenv('R2_SECRET_ACCESS_KEY'))
-        ];
-    }
+    // Bunny storage configuration and connectivity check.
+    $checks['bunny_storage'] = performBunnyHealthCheck();
+
+    // Manifest-backed bucket status check.
+    $bucketStatus = check_bucket_status();
+    $checks['bucket_manifest'] = [
+        'status' => $bucketStatus['status'] ?? 'warning',
+        'message' => $bucketStatus['message'] ?? 'Manifest status unavailable',
+        'details' => $bucketStatus['details'] ?? []
+    ];
     
-    // PHP extensions check
-    $requiredExtensions = ['pdo', 'pdo_sqlite', 'json', 'curl'];
+    // PHP extension checks should follow configured DB backend.
+    $requiredExtensions = ['pdo', 'json'];
+    if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+        $requiredExtensions[] = 'pdo_mysql';
+    } else {
+        $requiredExtensions[] = 'pdo_sqlite';
+    }
+
+    $optionalExtensions = ['curl'];
     $missingExtensions = [];
     foreach ($requiredExtensions as $ext) {
         if (!extension_loaded($ext)) {
             $missingExtensions[] = $ext;
+        }
+    }
+
+    $missingOptionalExtensions = [];
+    foreach ($optionalExtensions as $ext) {
+        if (!extension_loaded($ext)) {
+            $missingOptionalExtensions[] = $ext;
         }
     }
     
@@ -79,7 +98,9 @@ function performHealthChecks() {
         'status' => empty($missingExtensions) ? 'healthy' : 'error',
         'message' => empty($missingExtensions) ? 'All required extensions loaded' : 'Missing extensions: ' . implode(', ', $missingExtensions),
         'required' => $requiredExtensions,
-        'missing' => $missingExtensions
+        'missing' => $missingExtensions,
+        'optional' => $optionalExtensions,
+        'optional_missing' => $missingOptionalExtensions
     ];
     
     // Add push queue status
@@ -119,4 +140,47 @@ function performHealthChecks() {
             'server' => $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown'
         ]
     ];
+}
+
+function performBunnyHealthCheck() {
+    $zone = trim((string)BUNNY_STORAGE_ZONE);
+    $accessKey = trim((string)BUNNY_STORAGE_ACCESS_KEY);
+    $configured = ($zone !== '' && $zone !== 'your-storage-zone' && $accessKey !== '' && $accessKey !== 'your-bunny-storage-access-key');
+
+    if (!$configured) {
+        return [
+            'status' => 'error',
+            'message' => 'Bunny storage configuration missing',
+            'configured' => false,
+            'details' => [
+                'zone' => $zone,
+                'region' => (string)BUNNY_STORAGE_REGION,
+            ]
+        ];
+    }
+
+    try {
+        $items = bunny_list_directory_items('/');
+        return [
+            'status' => 'healthy',
+            'message' => 'Bunny storage accessible',
+            'configured' => true,
+            'details' => [
+                'zone' => $zone,
+                'region' => (string)BUNNY_STORAGE_REGION,
+                'root_items' => is_array($items) ? count($items) : 0,
+            ]
+        ];
+    } catch (Throwable $e) {
+        return [
+            'status' => 'error',
+            'message' => 'Bunny storage connectivity failed',
+            'configured' => true,
+            'details' => [
+                'zone' => $zone,
+                'region' => (string)BUNNY_STORAGE_REGION,
+                'error' => $e->getMessage(),
+            ]
+        ];
+    }
 }
