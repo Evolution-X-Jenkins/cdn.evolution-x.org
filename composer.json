@@ -1,5 +1,6 @@
 {
     "require": {
-        "aws/aws-sdk-php": "^3.366"
+        "aws/aws-sdk-php": "^3.366",
+        "bunnycdn/storage": "^3.4"
     }
 }

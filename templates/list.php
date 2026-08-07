@@ -4,53 +4,212 @@ ob_start();
 
 <script>
     document.addEventListener('DOMContentLoaded', function () {
+        const relativePath = <?php echo json_encode($relative_path, JSON_UNESCAPED_SLASHES); ?>;
+        const initialItems = <?php echo json_encode($initial_items ?? [], JSON_UNESCAPED_SLASHES); ?>;
         const searchInput = document.getElementById('file-search');
         const listContainer = document.getElementById('file-list');
         const emptyState = document.getElementById('file-search-empty');
+        const loadingState = document.getElementById('file-loading');
+        const errorState = document.getElementById('file-error');
         if (!searchInput || !listContainer) {
             return;
         }
 
-        const fileItems = Array.from(listContainer.querySelectorAll('[data-file-name]'));
-        let typingStarted = false;
+        const rowClasses = 'flex items-center space-x-2 text-white hover:underline border-2 border-[#0060ff] bg-[#0f172a] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg px-4 py-2 h-[50px] duration-100 ease-in hover:scale-105 hover:shadow-[0px_0px_38.5px_18px_#0060ff50]';
+        const fileRowClasses = 'flex items-center justify-between space-x-2 text-white border-2 border-[#0060ff] bg-[#0f172a] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg px-4 py-2 duration-100 ease-in hover:scale-105 hover:shadow-[0px_0px_38.5px_18px_#0060ff50]';
+        const fileLinkClasses = 'flex items-center space-x-2 flex-grow';
+        const statsButtonClasses = 'inline-flex w-full items-center justify-center rounded-full bg-[#0060ff] text-white transition-all duration-300 hover:bg-[#004bb5] p-[5px]';
+
+        const parentIcon = '<svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7M3 7l9-5 9 5" /></svg>';
+        const statsIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="24px" height="24px" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#ffffff" stroke-width="1.5"/><path d="M12 17V11" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/><circle cx="1" cy="1" r="1" transform="matrix(1 0 0 -1 11 9)" fill="#ffffff"/></svg>';
+
+        let items = Array.isArray(initialItems) ? initialItems : [];
+
+        function normalizePath(path) {
+            if (!path || path === '/') {
+                return '/';
+            }
+            return '/' + path.replace(/^\/+|\/+$/g, '').replace(/\/+/g, '/');
+        }
+
+        function getParentPath(path) {
+            const normalized = normalizePath(path);
+            if (normalized === '/') {
+                return '/';
+            }
+
+            const parts = normalized.split('/').filter(Boolean);
+            parts.pop();
+            return parts.length === 0 ? '/' : '/' + parts.join('/');
+        }
 
         function focusSearchInput() {
             searchInput.focus();
             searchInput.select();
-            typingStarted = true;
         }
 
-        function applyLiveFilter() {
-            const query = searchInput.value.trim().toLowerCase();
-            let visibleCount = 0;
-
-            fileItems.forEach(function (item) {
-                const isPinned = item.getAttribute('data-search-pinned') === 'true';
-                if (isPinned) {
-                    item.style.display = '';
-                    return;
-                }
-
-                const name = (item.getAttribute('data-file-name') || '').toLowerCase();
-                const matches = !query || name.includes(query);
-                item.style.display = matches ? '' : 'none';
-
-                if (matches) {
-                    visibleCount++;
-                }
-            });
-
-            if (emptyState) {
-                emptyState.classList.toggle('hidden', visibleCount > 0 || !query);
+        function getItemIcon(item, isDir) {
+            if (item && typeof item.icon === 'string' && item.icon.trim() !== '') {
+                return item.icon;
             }
 
+            if (isDir) {
+                return '<svg class="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 00-1.883 2.542l.857 6a2.25 2.25 0 002.227 1.932H19.05a2.25 2.25 0 002.227-1.932l.857-6a2.25 2.25 0 00-1.883-2.542m-16.5 0V6A2.25 2.25 0 016 3.75h3.879a1.125 1.125 0 01.966.542l.818 1.364a2.25 2.25 0 001.932 1.094H18A2.25 2.25 0 0120.25 9v.776" /></svg>';
+            }
+
+            return '<svg class="w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5-3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>';
+        }
+
+        function createParentRow() {
+            const wrapper = document.createElement('div');
+            wrapper.setAttribute('data-file-name', '..');
+
+            const link = document.createElement('a');
+            link.setAttribute('href', getParentPath(relativePath));
+            link.setAttribute('class', rowClasses);
+            link.innerHTML = parentIcon + '<span>...</span>';
+
+            wrapper.appendChild(link);
+            return wrapper;
+        }
+
+        function createDirectoryRow(item) {
+            const wrapper = document.createElement('div');
+            wrapper.setAttribute('data-file-name', item.name);
+
+            const link = document.createElement('a');
+            link.setAttribute('href', item.path);
+            link.setAttribute('class', rowClasses);
+            link.innerHTML = getItemIcon(item, true);
+
+            const label = document.createElement('span');
+            label.textContent = item.name + '/';
+            link.appendChild(label);
+
+            wrapper.appendChild(link);
+            return wrapper;
+        }
+
+        function createFileRow(item) {
+            const wrapper = document.createElement('div');
+            wrapper.setAttribute('data-file-name', item.name);
+
+            const row = document.createElement('div');
+            row.setAttribute('class', fileRowClasses);
+
+            const fileLink = document.createElement('a');
+            fileLink.setAttribute('href', item.path);
+            fileLink.setAttribute('class', fileLinkClasses);
+            fileLink.innerHTML = getItemIcon(item, false);
+
+            const label = document.createElement('span');
+            label.textContent = item.name;
+            fileLink.appendChild(label);
+
+            const actions = document.createElement('div');
+            actions.setAttribute('class', 'flex space-x-3');
+
+            const statsButton = document.createElement('a');
+            statsButton.setAttribute('href', item.path + '/stats');
+            statsButton.setAttribute('class', statsButtonClasses);
+            statsButton.innerHTML = statsIcon;
+
+            actions.appendChild(statsButton);
+            row.appendChild(fileLink);
+            row.appendChild(actions);
+            wrapper.appendChild(row);
+
+            return wrapper;
+        }
+
+        function setMessageState(showLoading, showError, showSearchEmpty) {
+            if (loadingState) {
+                loadingState.classList.toggle('hidden', !showLoading);
+            }
+            if (errorState) {
+                errorState.classList.toggle('hidden', !showError);
+            }
+            if (emptyState) {
+                emptyState.classList.toggle('hidden', !showSearchEmpty);
+            }
+        }
+
+        function renderList(query) {
+            const normalizedQuery = query.trim().toLowerCase();
+            const fragment = document.createDocumentFragment();
+
+            if (normalizePath(relativePath) !== '/') {
+                fragment.appendChild(createParentRow());
+            }
+
+            const filtered = items.filter(function(item) {
+                return !normalizedQuery || (item.name || '').toLowerCase().includes(normalizedQuery);
+            });
+
+            filtered.forEach(function(item) {
+                if (item.is_dir) {
+                    fragment.appendChild(createDirectoryRow(item));
+                    return;
+                }
+                fragment.appendChild(createFileRow(item));
+            });
+
+            listContainer.querySelectorAll('[data-file-name]').forEach(function(node) {
+                node.remove();
+            });
+            listContainer.prepend(fragment);
+
+            setMessageState(false, false, normalizedQuery !== '' && filtered.length === 0);
+
+            if (normalizedQuery === '' && normalizePath(relativePath) === '/' && filtered.length === 0 && errorState && loadingState) {
+                errorState.classList.add('hidden');
+                loadingState.classList.remove('hidden');
+                loadingState.textContent = 'No files or folders.';
+            }
+        }
+
+        function updateSearchUrl(query) {
             const url = new URL(window.location.href);
             if (query) {
-                url.searchParams.set('q', searchInput.value.trim());
+                url.searchParams.set('q', query);
             } else {
                 url.searchParams.delete('q');
             }
             window.history.replaceState({}, '', url);
+        }
+
+        function applyLiveFilter() {
+            const query = searchInput.value.trim().toLowerCase();
+            renderList(query);
+            updateSearchUrl(searchInput.value.trim());
+        }
+
+        async function loadListing(showLoading) {
+            if (showLoading) {
+                setMessageState(true, false, false);
+            }
+
+            try {
+                const response = await fetch('/api/bucket-listing?path=' + encodeURIComponent(relativePath), {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+
+                const payload = await response.json();
+                if (!response.ok || !payload.success || !payload.data || !Array.isArray(payload.data.items)) {
+                    throw new Error(payload.error || 'Invalid listing response');
+                }
+
+                items = payload.data.items;
+                applyLiveFilter();
+            } catch (error) {
+                console.error('Failed to load bucket listing', error);
+                if (showLoading || items.length === 0) {
+                    setMessageState(false, true, false);
+                }
+            }
         }
 
         document.addEventListener('keydown', function (event) {
@@ -74,14 +233,13 @@ ob_start();
                 event.preventDefault();
             }
         });
-        searchInput.addEventListener('blur', function () {
-            typingStarted = false;
-        });
-        searchInput.addEventListener('focus', function () {
-            typingStarted = true;
-        });
 
-        applyLiveFilter();
+        if (items.length > 0) {
+            applyLiveFilter();
+            loadListing(false);
+        } else {
+            loadListing(true);
+        }
     });
 </script>
 
@@ -128,57 +286,9 @@ ob_start();
 
     <!-- File listing -->
     <div id="file-list" class="grid gap-4">
-        <?php if ($relative_path != '/'): ?>
-            <?php
-            $parent_path = dirname($relative_path);
-            if ($parent_path == '/' || $parent_path == '.') {
-                $parent_path = '/';
-            } else {
-                $parent_path = '/' . ltrim($parent_path, '/');
-            }
-            ?>
-            <div data-file-name=".." data-search-pinned="true">
-                <a href="<?php echo htmlspecialchars($parent_path); ?>" class="flex items-center space-x-2 text-white hover:underline border-2 border-[#0060ff] bg-[#0f172a] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg px-4 py-2 h-[50px] duration-100 ease-in hover:scale-105 hover:shadow-[0px_0px_38.5px_18px_#0060ff50]">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7M3 7l9-5 9 5" /></svg>
-                    <span>...</span>
-                </a>
-            </div>
-        <?php endif; ?>
-        
-        <?php if (!empty($items)): ?>
-            <?php foreach ($items as $item): ?>
-            <div data-file-name="<?php echo htmlspecialchars($item['name']); ?>">
-                <?php if ($item['is_dir']): ?>
-                    <a href="<?php echo htmlspecialchars($item['path']); ?>" class="flex items-center space-x-2 text-white hover:underline border-2 border-[#0060ff] bg-[#0f172a] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg px-4 py-2 h-[50px] duration-100 ease-in hover:scale-105 hover:shadow-[0px_0px_38.5px_18px_#0060ff50]">
-                        <?php echo get_file_icon($item['name'], true); ?>
-                        <span><?php echo htmlspecialchars($item['name']); ?>/</span>
-                    </a>
-                <?php else: ?>
-                    <div class="flex items-center justify-between space-x-2 text-white border-2 border-[#0060ff] bg-[#0f172a] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg px-4 py-2 duration-100 ease-in hover:scale-105 hover:shadow-[0px_0px_38.5px_18px_#0060ff50]">
-                        <a href="<?php echo htmlspecialchars($item['path']); ?>" class="flex items-center space-x-2 flex-grow">
-                            <?php echo get_file_icon($item['name'], false); ?>
-                            <span><?php echo htmlspecialchars($item['name']); ?></span>
-                        </a>
-                        <div class="flex space-x-3">
-                            <a href="<?php echo htmlspecialchars($item['path'] . '/stats'); ?>" class="inline-flex w-full items-center justify-center rounded-full bg-[#0060ff] text-white transition-all duration-300 hover:bg-[#004bb5] p-[5px]">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="24px" height="24px" viewBox="0 0 24 24" fill="none">
-                                    <circle cx="12" cy="12" r="10" stroke="#ffffff" stroke-width="1.5"/>
-                                    <path d="M12 17V11" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
-                                    <circle cx="1" cy="1" r="1" transform="matrix(1 0 0 -1 11 9)" fill="#ffffff"/>
-                                </svg>
-                            </a>
-                        </div>
-                    </div>
-                <?php endif; ?>
-            </div>
-            <?php endforeach; ?>
-        <?php endif; ?>
-        
+        <div id="file-loading" class="text-gray-400 italic py-4">Loading files from storage bucket...</div>
+        <div id="file-error" class="hidden text-red-400 italic py-4">Unable to load files from storage bucket right now.</div>
         <div id="file-search-empty" class="hidden text-gray-600 italic py-4">No matching files or folders.</div>
-
-        <?php if (empty($items) && (!$relative_path || $relative_path == '/')): ?>
-            <div class="text-gray-600 italic py-4">No files or folders.</div>
-        <?php endif; ?>
     </div>
 
 <?php

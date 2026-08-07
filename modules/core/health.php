@@ -5,7 +5,6 @@
  */
 
 require_once __DIR__ . '/../setup/config.php';
-require_once __DIR__ . '/bucket_cache.php';
 require_once __DIR__ . '/manifest_index.php';
 require_once __DIR__ . '/../setup/database.php';
 require_once __DIR__ . '/rate_limit.php';
@@ -268,66 +267,122 @@ function check_jenkins_status() {
 }
 
 function check_bucket_status() {
-    // Use cached bucket statistics for fast loading
-    $cache = new BucketCache();
     $manifestStatus = listing_read_status_file();
     $manifestGenerated = 0;
     $manifestState = 'Unknown';
     $manifestUpdatedDisplay = 'unknown';
+    $totalFiles = null;
+    $totalSize = null;
+    $source = 'manifest_status';
 
     if (is_array($manifestStatus)) {
         $manifestGenerated = listing_parse_epoch($manifestStatus['generated_at'] ?? 0);
         $manifestState = (string)($manifestStatus['status'] ?? 'Unknown');
         $manifestUpdatedDisplay = format_time_ago_for_health($manifestGenerated);
+
+        if (isset($manifestStatus['total_files'])) {
+            $totalFiles = (int)$manifestStatus['total_files'];
+        }
+        if (isset($manifestStatus['total_size'])) {
+            $totalSize = (int)$manifestStatus['total_size'];
+        }
     }
-    
-    // Check if cache exists first
-    $cached = $cache->readCache();
-    
-    if ($cached && $cache->isCacheValid($cached)) {
-        // Return cached data
-        $stats = $cached['data'];
-        return [
-            'name' => 'Bucket Size',
-            'status' => $stats['status'],
-            'message' => $stats['message'],
-            'details' => [
-                'Total Files' => number_format($stats['total_files']),
-                'Total Size' => format_file_size($stats['total_size']),
-                'Directory' => $stats['path'],
-                'Manifest Status' => $manifestState,
-                'Manifest Updated' => $manifestUpdatedDisplay
-            ]
-        ];
-    } elseif ($cached) {
-        // Return stale cache data with warning
-        $stats = $cached['data'];
+
+    if ($totalFiles === null || $totalSize === null) {
+        $tree = listing_load_manifest_tree();
+        if (is_array($tree)) {
+            $source = 'manifest_json';
+            if ($manifestGenerated <= 0) {
+                $manifestGenerated = listing_parse_epoch($tree['generated_at'] ?? 0);
+                $manifestUpdatedDisplay = format_time_ago_for_health($manifestGenerated);
+            }
+
+            if (isset($tree['totals']) && is_array($tree['totals'])) {
+                $totalFiles = isset($tree['totals']['total_files']) ? (int)$tree['totals']['total_files'] : $totalFiles;
+                $totalSize = isset($tree['totals']['total_size']) ? (int)$tree['totals']['total_size'] : $totalSize;
+            }
+
+            if ($totalFiles === null || $totalSize === null) {
+                $counts = listing_compute_manifest_totals_for_health($tree);
+                if ($totalFiles === null) {
+                    $totalFiles = $counts['total_files'];
+                }
+                if ($totalSize === null) {
+                    $totalSize = $counts['total_size'];
+                }
+            }
+        }
+    }
+
+    if ($totalFiles === null || $totalSize === null) {
         return [
             'name' => 'Bucket Size',
             'status' => 'warning',
-            'message' => 'Cache outdated (cron will update)',
+            'message' => 'Manifest totals unavailable',
             'details' => [
-                'Total Files' => number_format($stats['total_files']) . ' (stale)',
-                'Total Size' => format_file_size($stats['total_size']) . ' (stale)',
-                'Directory' => $stats['path'],
                 'Manifest Status' => $manifestState,
-                'Manifest Updated' => $manifestUpdatedDisplay
-            ]
-        ];
-    } else {
-        // No cache - return calculating status
-        return [
-            'name' => 'Bucket Size',
-            'status' => 'warning',
-            'message' => 'Calculating... (check back in a few minutes)',
-            'details' => [
-                'Directory' => BASE_PATH,
-                'Note' => 'Initial calculation in progress via cron job',
-                'Manifest Status' => $manifestState,
-                'Manifest Updated' => $manifestUpdatedDisplay
+                'Manifest Updated' => $manifestUpdatedDisplay,
+                'Source' => $source,
             ]
         ];
     }
+
+    $status = 'healthy';
+    $message = format_file_size($totalSize) . ' in ' . number_format($totalFiles) . ' files';
+
+    if ($manifestState !== 'ok') {
+        $status = 'warning';
+        $message = 'Manifest state: ' . $manifestState;
+    }
+
+    if ($manifestGenerated > 0 && (time() - $manifestGenerated) > 7200 && $status === 'healthy') {
+        $status = 'warning';
+        $message = 'Manifest data is stale';
+    }
+
+    return [
+        'name' => 'Bucket Size',
+        'status' => $status,
+        'message' => $message,
+        'details' => [
+            'Total Files' => number_format($totalFiles),
+            'Total Size' => format_file_size($totalSize),
+            'Manifest Status' => $manifestState,
+            'Manifest Updated' => $manifestUpdatedDisplay,
+            'Source' => $source,
+        ]
+    ];
+}
+
+function listing_compute_manifest_totals_for_health($node) {
+    $totalFiles = 0;
+    $totalSize = 0;
+
+    $walker = function($entry) use (&$walker, &$totalFiles, &$totalSize) {
+        if (!is_array($entry)) {
+            return;
+        }
+
+        if (!empty($entry['is_dir'])) {
+            $children = $entry['contents'] ?? [];
+            if (is_array($children)) {
+                foreach ($children as $child) {
+                    $walker($child);
+                }
+            }
+            return;
+        }
+
+        $totalFiles++;
+        $totalSize += max(0, (int)($entry['size'] ?? 0));
+    };
+
+    $walker($node);
+
+    return [
+        'total_files' => $totalFiles,
+        'total_size' => $totalSize,
+    ];
 }
 function check_push_queue_status() {
     try {

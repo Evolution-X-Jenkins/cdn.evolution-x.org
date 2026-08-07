@@ -15,6 +15,7 @@ if (isset($_SERVER['HTTP_HOST'])) {
 
 require_once __DIR__ . '/modules/setup/config.php';
 require_once __DIR__ . '/modules/setup/database.php';
+require_once __DIR__ . '/modules/setup/bunny_storage.php';
 require_once __DIR__ . '/modules/core/manifest_index.php';
 
 $logsDir = __DIR__ . '/logs';
@@ -60,13 +61,10 @@ function release_manifest_lock($handle) {
     @fclose($handle);
 }
 
-function build_manifest_node($fullPath, $relativePath, $firstSeenMap, $generatedAt) {
-    $name = $relativePath === '/' ? '/' : basename($fullPath);
-    $stat = @stat($fullPath);
-    $modifiedAt = 0;
-    if ($stat !== false && isset($stat['mtime'])) {
-        $modifiedAt = (int)$stat['mtime'];
-    }
+function build_manifest_node_from_bunny($relativePath, $firstSeenMap, $generatedAt, $directoryModifiedAt = 0) {
+    $relativePath = bunny_normalize_relative_path($relativePath);
+    $name = $relativePath === '/' ? '/' : basename($relativePath);
+    $modifiedAt = (int)$directoryModifiedAt;
 
     $firstSeenAt = isset($firstSeenMap[$relativePath]) ? $firstSeenMap[$relativePath] : $generatedAt;
 
@@ -80,43 +78,32 @@ function build_manifest_node($fullPath, $relativePath, $firstSeenMap, $generated
         'contents' => [],
     ];
 
-    $files = @scandir($fullPath);
-    if (!is_array($files)) {
-        return $node;
-    }
-
-    foreach ($files as $file) {
-        if ($file === '.' || $file === '..' || listing_should_hide_name($file)) {
+    $items = bunny_list_directory_items($relativePath);
+    foreach ($items as $item) {
+        if (!is_array($item)) {
             continue;
         }
 
-        $childRelative = $relativePath === '/' ? '/' . $file : $relativePath . '/' . $file;
-        $childFull = $fullPath . '/' . $file;
-        $childStat = @stat($childFull);
-        $childIsDir = $childStat !== false && (($childStat['mode'] & 0170000) === 0040000);
-        $childIsFile = $childStat !== false && (($childStat['mode'] & 0170000) === 0100000);
-
-        $childModifiedAt = 0;
-        if ($childStat !== false && isset($childStat['mtime'])) {
-            $childModifiedAt = (int)$childStat['mtime'];
+        $childName = (string)($item['name'] ?? '');
+        if ($childName === '' || listing_should_hide_name($childName)) {
+            continue;
         }
 
+        $childRelative = listing_normalize_relative_path((string)($item['path'] ?? ''));
         $childFirstSeenAt = isset($firstSeenMap[$childRelative]) ? $firstSeenMap[$childRelative] : $generatedAt;
+        $childModifiedAt = (int)($item['modified_at'] ?? 0);
+        $childIsDir = !empty($item['is_dir']);
 
         if ($childIsDir) {
-            $node['contents'][] = build_manifest_node($childFull, $childRelative, $firstSeenMap, $generatedAt);
-            continue;
-        }
-
-        if (!$childIsFile) {
+            $node['contents'][] = build_manifest_node_from_bunny($childRelative, $firstSeenMap, $generatedAt, $childModifiedAt);
             continue;
         }
 
         $node['contents'][] = [
-            'name' => $file,
+            'name' => $childName,
             'path' => $childRelative,
             'is_dir' => false,
-            'size' => isset($childStat['size']) ? (int)$childStat['size'] : 0,
+            'size' => (int)($item['size'] ?? 0),
             'modified_at' => $childModifiedAt,
             'first_seen_at' => $childFirstSeenAt,
         ];
@@ -126,7 +113,7 @@ function build_manifest_node($fullPath, $relativePath, $firstSeenMap, $generated
     return $node;
 }
 
-function count_manifest_nodes($node, &$dirs, &$files) {
+function count_manifest_nodes($node, &$dirs, &$files, &$totalSize) {
     if (!is_array($node)) {
         return;
     }
@@ -136,13 +123,14 @@ function count_manifest_nodes($node, &$dirs, &$files) {
         $children = $node['contents'] ?? [];
         if (is_array($children)) {
             foreach ($children as $child) {
-                count_manifest_nodes($child, $dirs, $files);
+                count_manifest_nodes($child, $dirs, $files, $totalSize);
             }
         }
         return;
     }
 
     $files++;
+    $totalSize += max(0, (int)($node['size'] ?? 0));
 }
 
 manifest_log('Listing manifest build started');
@@ -156,8 +144,12 @@ $start = microtime(true);
 $generatedAt = time();
 
 try {
-    if (!is_dir(BASE_PATH) || !is_readable(BASE_PATH)) {
-        throw new RuntimeException('BASE_PATH is missing or unreadable: ' . BASE_PATH);
+    if (trim((string)BUNNY_STORAGE_ZONE) === '' || trim((string)BUNNY_STORAGE_ZONE) === 'your-storage-zone') {
+        throw new RuntimeException('BUNNY_STORAGE_ZONE is missing');
+    }
+
+    if (trim((string)BUNNY_STORAGE_ACCESS_KEY) === '' || trim((string)BUNNY_STORAGE_ACCESS_KEY) === 'your-bunny-storage-access-key') {
+        throw new RuntimeException('BUNNY_STORAGE_ACCESS_KEY is missing');
     }
 
     if (!is_dir(LISTING_MANIFEST_DIR)) {
@@ -173,13 +165,24 @@ try {
         listing_collect_first_seen_map($existing, $firstSeenMap);
     }
 
-    manifest_log('Building manifest tree from filesystem');
-    $tree = build_manifest_node(BASE_PATH, '/', $firstSeenMap, $generatedAt);
+    manifest_log('Building manifest tree from Bunny storage');
+    $tree = build_manifest_node_from_bunny('/', $firstSeenMap, $generatedAt, $generatedAt);
     $tree['generated_at'] = $generatedAt;
 
     $dirCount = 0;
     $fileCount = 0;
-    count_manifest_nodes($tree, $dirCount, $fileCount);
+    $totalSize = 0;
+    count_manifest_nodes($tree, $dirCount, $fileCount, $totalSize);
+
+    $tree['totals'] = [
+        'total_files' => $fileCount,
+        'total_size' => $totalSize,
+    ];
+    $tree['total_files'] = $fileCount;
+    $tree['total_size'] = [
+        'bytes' => $totalSize,
+        'human' => format_file_size($totalSize),
+    ];
 
     $tmpFile = LISTING_MANIFEST_FILE . '.tmp';
     $encoded = json_encode($tree, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
@@ -216,7 +219,9 @@ try {
         'duration_seconds' => round($duration, 3),
         'directories_indexed' => max(0, $dirCount - 1),
         'files_indexed' => $fileCount,
-        'source' => 'filesystem',
+        'total_files' => $fileCount,
+        'total_size' => $totalSize,
+        'source' => 'bunny_storage',
         'strict_mode' => true,
     ];
 
@@ -224,6 +229,7 @@ try {
     manifest_log('Manifest build complete in ' . number_format($duration, 2) . 's');
     manifest_log('Directories indexed: ' . max(0, $dirCount - 1));
     manifest_log('Files indexed: ' . $fileCount);
+    manifest_log('Total size: ' . format_file_size($totalSize));
 
     release_manifest_lock($lockHandle);
     exit(0);

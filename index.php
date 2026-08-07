@@ -6,6 +6,7 @@
 
 require_once 'modules/setup/config.php';
 require_once 'modules/setup/database.php';
+require_once 'modules/setup/bunny_storage.php';
 require_once 'modules/core/rate_limit.php';
 require_once 'modules/core/manifest_index.php';
 
@@ -109,10 +110,45 @@ if (preg_match('/^(.+?)\/download$/', $clean_path, $matches)) {
     }
 }
 
+function is_bunny_file_path($path) {
+    $normalizedPath = bunny_normalize_relative_path('/' . ltrim((string)$path, '/'));
+    if ($normalizedPath === '/') {
+        return false;
+    }
+
+    $parentPath = dirname($normalizedPath);
+    if ($parentPath === '.' || $parentPath === '') {
+        $parentPath = '/';
+    }
+    if ($parentPath[0] !== '/') {
+        $parentPath = '/' . $parentPath;
+    }
+
+    $targetName = basename($normalizedPath);
+
+    try {
+        $items = bunny_list_directory_items($parentPath);
+        foreach ($items as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            if ((string)($item['name'] ?? '') === $targetName && empty($item['is_dir'])) {
+                return true;
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('Bunny file path lookup failed for ' . $normalizedPath . ': ' . $e->getMessage());
+    }
+
+    return false;
+}
+
 // Bare file URLs (e.g. /folder/file.zip) should open the countdown page.
 if (!$is_download && !$is_download_page && !$is_direct_download && !$is_proxy_download && !$is_stats && $clean_path !== '') {
     $resolved_path = sanitize_path($clean_path, BASE_PATH);
     $isManifestFile = false;
+    $isBunnyFile = false;
 
     if (!is_file($resolved_path)) {
         try {
@@ -122,9 +158,13 @@ if (!$is_download && !$is_download_page && !$is_direct_download && !$is_proxy_do
         } catch (Exception $e) {
             $isManifestFile = false;
         }
+
+        if (!$isManifestFile) {
+            $isBunnyFile = is_bunny_file_path($clean_path);
+        }
     }
 
-    if (is_file($resolved_path) || $isManifestFile) {
+    if (is_file($resolved_path) || $isManifestFile || $isBunnyFile) {
         $is_download_page = true;
         $target_file = $clean_path;
         $clean_path = dirname($target_file);
@@ -140,6 +180,7 @@ if ($is_download_page) {
     $file_path = sanitize_path($target_file, BASE_PATH);
     $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
     $manifestFileMeta = null;
+    $isBunnyFile = false;
 
     if (!is_file($file_path)) {
         try {
@@ -148,9 +189,13 @@ if ($is_download_page) {
         } catch (Exception $e) {
             $manifestFileMeta = null;
         }
+
+        if (!(is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir']))) {
+            $isBunnyFile = is_bunny_file_path($target_file);
+        }
     }
 
-    if (is_file($file_path) || (is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir']))) {
+    if (is_file($file_path) || (is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir'])) || $isBunnyFile) {
         // Allow automated clients to bypass the countdown page.
         $allowedAgents = ['evoxupdater', 'evox updater', 'wget', 'curl', 'aria2', 'php'];
         $userAgentLower = strtolower($userAgent);
@@ -233,6 +278,7 @@ function DownloadRom($target_file, $proxy) {
 
     $file_path = sanitize_path($target_file, BASE_PATH);
     $manifestFileMeta = null;
+    $isBunnyFile = false;
     if (!is_file($file_path)) {
         try {
             $lookupMeta = [];
@@ -240,9 +286,13 @@ function DownloadRom($target_file, $proxy) {
         } catch (Exception $e) {
             $manifestFileMeta = null;
         }
+
+        if (!(is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir']))) {
+            $isBunnyFile = is_bunny_file_path($target_file);
+        }
     }
 
-    if (is_file($file_path) || (is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir']))) {
+    if (is_file($file_path) || (is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir'])) || $isBunnyFile) {
         log_action('Direct download requested', $target_file);
 
         // Record download statistics for direct/proxy delivery paths.

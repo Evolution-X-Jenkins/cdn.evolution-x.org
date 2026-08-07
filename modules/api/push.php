@@ -9,8 +9,10 @@ ini_set('error_log', __DIR__ . '/../../logs/push_api.log');
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
+require_once __DIR__ . '/../setup/bunny_storage.php';
 require_once __DIR__ . '/../core/file_operations.php';
 require_once __DIR__ . '/../core/bucket_cache.php';
+require_once __DIR__ . '/../core/cache.php';
 
 function logPushApiExit($result, $requestId = null, $context = '') {
     $timestamp = date('Y-m-d H:i:s');
@@ -383,10 +385,10 @@ function validateAndResolvePushRequest($codename, $date, $version, $buildType, $
     $sourceDate = str_replace('-', '', $date);
     if ($buildType === 'gapps') {
         $sourcePath = PRE_RELEASE_PATH . "/$codename/$sourceDate";
-        $destPath = BASE_PATH . "/$codename/$versionInt";
+        $destPath = "/$codename/$versionInt";
     } else {
         $sourcePath = PRE_RELEASE_PATH . "/$codename/{$sourceDate}_Vanilla";
-        $destPath = BASE_PATH . "/$codename/{$versionInt}_vanilla";
+        $destPath = "/$codename/{$versionInt}_vanilla";
     }
 
     if (!isPushSourcePathAccessible($sourcePath, $requestId)) {
@@ -579,7 +581,7 @@ function logPushWorkerProgress($jobId, $message) {
 function executeQueuedPushReleaseJob($job) {
     $jobId = (int)$job['id'];
     $sourcePath = $job['source_path'];
-    $destPath = $job['destination_path'];
+    $destPath = normalizePushDestinationPath((string)$job['destination_path']);
     $codename = trim((string)($job['codename'] ?? 'unknown'));
 
     logPushWorkerProgress($jobId, "starting from $sourcePath to $destPath");
@@ -596,19 +598,10 @@ function executeQueuedPushReleaseJob($job) {
     logPushWorkerProgress($jobId, 'clearing destination hashes');
     clearHashesForPath($destPath);
 
-    if (!is_dir($destPath) && !mkdir($destPath, 0755, true)) {
-        $message = "Failed to create destination directory: $destPath";
-        logPushWorkerProgress($jobId, $message);
-        return [
-            'success' => false,
-            'error' => $message
-        ];
-    }
-
-    logPushWorkerProgress($jobId, 'beginning file copy');
-    $copyResult = copyRecursively($sourcePath, $destPath, $jobId);
+    logPushWorkerProgress($jobId, 'beginning Bunny upload');
+    $copyResult = uploadDirectoryToBunny($sourcePath, $destPath, $jobId, $codename);
     if (!$copyResult) {
-        $message = "Background processing failed during file copy for job #$jobId";
+        $message = "Background processing failed during Bunny upload for job #$jobId";
         logPushWorkerProgress($jobId, $message);
         return [
             'success' => false,
@@ -616,9 +609,9 @@ function executeQueuedPushReleaseJob($job) {
         ];
     }
 
-    logPushWorkerProgress($jobId, 'verifying copied files');
-    if (!verifyDirectoryCopyIntegrity($sourcePath, $destPath, $jobId)) {
-        $message = "Background processing failed copy verification for job #$jobId";
+    logPushWorkerProgress($jobId, 'verifying uploaded files');
+    if (!verifyBunnyUploadIntegrity($sourcePath, $destPath, $jobId, $codename)) {
+        $message = "Background processing failed Bunny upload verification for job #$jobId";
         logPushWorkerProgress($jobId, $message);
         return [
             'success' => false,
@@ -648,6 +641,7 @@ function executeQueuedPushReleaseJob($job) {
     logPushWorkerProgress($jobId, 'invalidating cache');
     $cache = new BucketCache();
     $cache->invalidateCache();
+    invalidateBunnyListingCachesForPath($destPath);
 
     logPushWorkerProgress($jobId, 'completed successfully and cache invalidated');
 
@@ -661,6 +655,151 @@ function executeQueuedPushReleaseJob($job) {
     }
 
     return $result;
+}
+
+function uploadDirectoryToBunny($source, $destPath, $jobId = null, $codename = null) {
+    if (!is_dir($source)) {
+        return false;
+    }
+
+    $client = bunny_get_storage_client();
+    $destPrefix = trim(normalizePushDestinationPath((string)$destPath), '/');
+
+    $filesToProcess = [];
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+
+    foreach ($iterator as $item) {
+        if (!$item->isFile()) {
+            continue;
+        }
+
+        $relativePath = str_replace('\\', '/', $iterator->getSubPathName());
+        $remotePath = $destPrefix === '' ? $relativePath : ($destPrefix . '/' . $relativePath);
+
+        $filesToProcess[] = [
+            'relativePath' => $relativePath,
+            'sourcePath' => $item->getPathname(),
+            'remotePath' => $remotePath,
+        ];
+    }
+
+    if ($jobId !== null) {
+        logPushWorkerProgress($jobId, 'Uploading [' . count($filesToProcess) . '] files to Bunny storage');
+    }
+
+    foreach ($filesToProcess as $file) {
+        if ($jobId !== null) {
+            $displayName = ($codename ?: 'unknown') . ' - ' . $file['relativePath'];
+            logPushWorkerProgress($jobId, '- ' . $displayName . ' (uploading)');
+        }
+
+        try {
+            $client->upload($file['sourcePath'], $file['remotePath']);
+        } catch (Throwable $e) {
+            if ($jobId !== null) {
+                logPushWorkerProgress($jobId, 'Upload failed for ' . $file['relativePath'] . ': ' . $e->getMessage());
+            }
+            return false;
+        }
+
+        if ($jobId !== null) {
+            $displayName = ($codename ?: 'unknown') . ' - ' . $file['relativePath'];
+            logPushWorkerProgress($jobId, '- ' . $displayName . ' (completed)');
+        }
+    }
+
+    return true;
+}
+
+function verifyBunnyUploadIntegrity($source, $destPath, $jobId = null, $codename = null) {
+    if (!is_dir($source)) {
+        return false;
+    }
+
+    $client = bunny_get_storage_client();
+    $destPrefix = trim(normalizePushDestinationPath((string)$destPath), '/');
+
+    $sourceIterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS)
+    );
+
+    $verifiedFiles = 0;
+
+    foreach ($sourceIterator as $item) {
+        if (!$item->isFile()) {
+            continue;
+        }
+
+        $relativePath = str_replace('\\', '/', $sourceIterator->getSubPathName());
+        $remotePath = $destPrefix === '' ? $relativePath : ($destPrefix . '/' . $relativePath);
+
+        try {
+            $remoteInfo = $client->info($remotePath);
+        } catch (Throwable $e) {
+            if ($jobId !== null) {
+                logPushWorkerProgress($jobId, 'Verification failed for ' . $relativePath . ': ' . $e->getMessage());
+            }
+            return false;
+        }
+
+        if ((int)$item->getSize() !== (int)$remoteInfo->getSize()) {
+            if ($jobId !== null) {
+                logPushWorkerProgress($jobId, 'Size mismatch for ' . $relativePath . ' local=' . (int)$item->getSize() . ' remote=' . (int)$remoteInfo->getSize());
+            }
+            return false;
+        }
+
+        $verifiedFiles++;
+        if ($jobId !== null && $verifiedFiles % 50 === 0) {
+            logPushWorkerProgress($jobId, 'verification progress: checked ' . $verifiedFiles . ' Bunny files');
+        }
+    }
+
+    if ($jobId !== null) {
+        logPushWorkerProgress($jobId, 'verification progress: checked ' . $verifiedFiles . ' Bunny files total');
+    }
+
+    return true;
+}
+
+function invalidateBunnyListingCachesForPath($path) {
+    try {
+        $cache = CacheManager::getInstance();
+        $normalized = bunny_normalize_relative_path(normalizePushDestinationPath((string)$path));
+
+        $paths = ['/'];
+        if ($normalized !== '/') {
+            $segments = explode('/', trim($normalized, '/'));
+            $current = '';
+            foreach ($segments as $segment) {
+                $current .= '/' . $segment;
+                $paths[] = $current;
+            }
+        }
+
+        foreach (array_unique($paths) as $cachePath) {
+            $cache->delete('bunny_listing:' . md5($cachePath));
+        }
+    } catch (Throwable $e) {
+        error_log('Failed to invalidate Bunny listing cache for path ' . $path . ': ' . $e->getMessage());
+    }
+}
+
+function normalizePushDestinationPath($path) {
+    $path = trim((string)$path);
+
+    if ($path === '') {
+        return '/';
+    }
+
+    if (strpos($path, BASE_PATH) === 0) {
+        $path = '/' . ltrim(str_replace(BASE_PATH, '', $path), '/');
+    }
+
+    return bunny_normalize_relative_path($path);
 }
 
 function shouldFailPushOnCleanupError() {
