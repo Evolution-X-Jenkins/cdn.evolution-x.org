@@ -144,6 +144,10 @@ function bunny_watch_discover_release_directories($rootPath) {
             continue;
         }
 
+        if (strpos($codename, '.') === 0) {
+            continue;
+        }
+
         $codenamePath = $resolvedRoot . '/' . $codename;
         if (!is_dir($codenamePath)) {
             continue;
@@ -156,6 +160,10 @@ function bunny_watch_discover_release_directories($rootPath) {
 
         foreach ($secondLevel as $release) {
             if ($release === '.' || $release === '..') {
+                continue;
+            }
+
+            if (strpos($release, '.') === 0) {
                 continue;
             }
 
@@ -172,6 +180,11 @@ function bunny_watch_discover_release_directories($rootPath) {
     return $result;
 }
 
+function bunny_watch_is_upload_candidate($relativePath) {
+    $ext = strtolower(pathinfo($relativePath, PATHINFO_EXTENSION));
+    return in_array($ext, ['zip', 'img'], true);
+}
+
 function bunny_watch_collect_release_files($releasePath) {
     $resolved = realpath($releasePath);
     if ($resolved === false || !is_dir($resolved) || !is_readable($resolved)) {
@@ -179,6 +192,7 @@ function bunny_watch_collect_release_files($releasePath) {
     }
 
     $files = [];
+    $candidateCount = 0;
     $iterator = new RecursiveIteratorIterator(
         new RecursiveDirectoryIterator($resolved, RecursiveDirectoryIterator::SKIP_DOTS),
         RecursiveIteratorIterator::SELF_FIRST,
@@ -198,13 +212,17 @@ function bunny_watch_collect_release_files($releasePath) {
             'file_size' => (int)@filesize($path),
             'last_modified' => (int)@filemtime($path),
         ];
+
+        if (bunny_watch_is_upload_candidate($relativePath)) {
+            $candidateCount++;
+        }
     }
 
     usort($files, static function($a, $b) {
         return strcmp($a['path'], $b['path']);
     });
 
-    if (empty($files)) {
+    if (empty($files) || $candidateCount === 0) {
         return null;
     }
 
@@ -360,12 +378,14 @@ while (true) {
     $seen = [];
     $scannedReleases = 0;
     $queuedThisPass = 0;
+    $ignoredThisPass = 0;
 
     foreach ($options['roots'] as $root) {
         $releaseDirs = bunny_watch_discover_release_directories($root);
         foreach ($releaseDirs as $releaseDir) {
             $collected = bunny_watch_collect_release_files($releaseDir);
             if ($collected === null) {
+                $ignoredThisPass++;
                 continue;
             }
 
@@ -432,14 +452,14 @@ while (true) {
     }
 
     foreach (array_keys($state['items']) as $trackedPath) {
-        if (!isset($seen[$trackedPath]) && !is_dir($trackedPath)) {
+        if (!isset($seen[$trackedPath])) {
             unset($state['items'][$trackedPath]);
         }
     }
 
     bunny_watch_save_state($options['stateFile'], $state);
 
-    bunny_watch_log('Pass ' . $pass . ' complete: scanned_releases=' . $scannedReleases . ' pending=' . count($state['items']) . ' queued=' . $queuedThisPass);
+    bunny_watch_log('Pass ' . $pass . ' complete: scanned_releases=' . $scannedReleases . ' ignored=' . $ignoredThisPass . ' pending=' . count($state['items']) . ' queued=' . $queuedThisPass);
 
     if ((time() - $startedAt) >= $options['runSeconds']) {
         break;
