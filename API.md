@@ -234,7 +234,7 @@ curl "http://localhost:8000/api/download-stats?folder=OnePlus/OnePlus6&limit=10"
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `file` | string | Yes | Relative file path |
+| `path` | string | Yes | Relative file path |
 
 **Response:**
 ```json
