@@ -128,6 +128,18 @@ Calculate/Fetch (and backfill all caches)
 - Comprehensive logging of job processing
 - Should run every minute via crontab
 
+**cron_bunny_watch.php**
+- Runs a finite scan window, snapshots release files to JSON, verifies stability, then queues stable releases
+- Intended for SCP/uploads into the local pre-release tree
+- Supports multiple watched roots via `--roots=` or `BUNNY_WATCH_ROOTS`
+- Should run every 5 minutes via crontab (default run window is 30 seconds)
+
+**cron_bunny_sync.php**
+- Mirrors local mount uploads into Bunny storage
+- Intended for users who still SCP files into the mount path
+- Skips unchanged files using a local state file
+- Should run every minute via crontab
+
 **generate_hashes.php**
 - CLI utility for bulk hash generation
 - Scans directory tree and calculates file hashes
@@ -555,6 +567,9 @@ Response format:
    # Push queue processing every minute
    * * * * * php /path/to/cron_push_queue.php >> /path/to/logs/push_queue.log 2>&1
 
+  # Scan uploads every 5 minutes; each run checks stability for 30 seconds
+  */5 * * * * php /path/to/cron_bunny_watch.php --interval=5 --stable-seconds=30 --run-seconds=30 >> /path/to/logs/cron_bunny_watch.log 2>&1
+
   # Convert yesterday's app log to CSV each day
   5 0 * * * php /path/to/cron_daily_log_to_csv.php >> /path/to/logs/cron_csv.log 2>&1
 
@@ -909,6 +924,8 @@ php_filebrowser_v2/
 ├── composer.json          # Dependencies
 ├── start.sh              # Development server script
 ├── cron.php              # Maintenance script
+├── cron_bunny_watch.php  # Cron scanner that snapshots files and queues stable releases
+├── cron_bunny_sync.php   # Local mount → Bunny mirror helper
 ├── cron_push_queue.php   # Queue worker
 ├── generate_hashes.php   # Hash generation utility
 ├── modules/

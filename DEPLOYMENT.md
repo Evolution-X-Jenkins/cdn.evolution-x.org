@@ -361,6 +361,9 @@ sudo systemctl reload apache2
    # Push queue processing every minute
    * * * * * /usr/bin/php /var/www/filebrowser/cron_push_queue.php >> /var/www/filebrowser/logs/push_queue.log 2>&1
 
+   # Mirror local mount uploads into Bunny storage every minute
+   * * * * * /usr/bin/php /var/www/filebrowser/cron_bunny_sync.php >> /var/www/filebrowser/logs/cron_bunny_sync.log 2>&1
+
    # Log rotation daily at 2 AM
    0 2 * * * find /var/www/filebrowser/logs -name "*.log" -mtime +30 -delete
    ```

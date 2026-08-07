@@ -609,6 +609,9 @@ function executeQueuedPushReleaseJob($job) {
         ];
     }
 
+    logPushWorkerProgress($jobId, 'upload finished, waiting 30 seconds before bucket verification');
+    sleep(30);
+
     logPushWorkerProgress($jobId, 'verifying uploaded files');
     if (!verifyBunnyUploadIntegrity($sourcePath, $destPath, $jobId, $codename)) {
         $message = "Background processing failed Bunny upload verification for job #$jobId";
@@ -1135,6 +1138,105 @@ function findPushQueueJobBySourcePath($db, $sourcePath) {
     $stmt = $db->prepare('SELECT id, status FROM push_release_queue WHERE source_path = ? ORDER BY id DESC LIMIT 1');
     $stmt->execute([$sourcePath]);
     return $stmt->fetch() ?: null;
+}
+
+function queuePushReleaseFromDirectory($releaseDirectory, $requestedBy = 'watcher') {
+    $normalizedDirectory = rtrim((string)$releaseDirectory, '/');
+    if ($normalizedDirectory === '') {
+        return [
+            'status' => 'error',
+            'message' => 'Release directory is required'
+        ];
+    }
+
+    $realDirectory = realpath($normalizedDirectory);
+    if ($realDirectory === false || !is_dir($realDirectory)) {
+        return [
+            'status' => 'error',
+            'message' => 'Release directory not found: ' . $normalizedDirectory
+        ];
+    }
+
+    try {
+        $db = Database::getInstance()->getConnection();
+        $existingJob = findPushQueueJobBySourcePath($db, $realDirectory);
+        if (is_array($existingJob)) {
+            return [
+                'status' => 'queued',
+                'jobId' => (int)($existingJob['id'] ?? 0),
+                'existing' => true,
+                'sourcePath' => $realDirectory,
+            ];
+        }
+    } catch (Throwable $e) {
+        return [
+            'status' => 'error',
+            'message' => 'Failed to check existing queue entry: ' . $e->getMessage(),
+        ];
+    }
+
+    $zipFiles = glob($realDirectory . '/*.zip');
+    if (!$zipFiles || !is_array($zipFiles)) {
+        return [
+            'status' => 'error',
+            'message' => 'No release zip found in ' . $realDirectory
+        ];
+    }
+
+    usort($zipFiles, function($a, $b) {
+        return filemtime($b) <=> filemtime($a);
+    });
+
+    $zipFile = $zipFiles[0];
+    $metadata = parsePushReleaseMetadataFromFilename(basename($zipFile), $realDirectory);
+    if ($metadata === null) {
+        return [
+            'status' => 'error',
+            'message' => 'Unable to parse release metadata from ' . basename($zipFile)
+        ];
+    }
+
+    return processPushRequest(
+        $metadata['codename'],
+        $metadata['date'],
+        $metadata['version'],
+        $metadata['buildType'],
+        $requestedBy
+    );
+}
+
+function parsePushReleaseMetadataFromFilename($filename, $releaseDirectory = '') {
+    $filename = basename((string)$filename);
+    $releaseDirectory = rtrim((string)$releaseDirectory, '/');
+
+    if (!preg_match('/^EvolutionX-(\d+)\.(\d+)-([0-9]{8})-([A-Za-z0-9._-]+)-([A-Za-z0-9._-]+)-(Vanilla-)?Official\.zip$/i', $filename, $matches)) {
+        return null;
+    }
+
+    $version = (string)(int)$matches[1];
+    $dateRaw = (string)$matches[3];
+    $codename = trim((string)$matches[4]);
+    $buildType = !empty($matches[6]) ? 'vanilla' : 'gapps';
+
+    if ($releaseDirectory !== '' && preg_match('/\/([A-Za-z0-9._-]+)\/(\d{8})(?:_Vanilla)?$/', $releaseDirectory, $dirMatches)) {
+        $codename = $dirMatches[1];
+        $dateRaw = $dirMatches[2];
+        if (str_ends_with($releaseDirectory, '_Vanilla')) {
+            $buildType = 'vanilla';
+        }
+    }
+
+    $date = DateTime::createFromFormat('Ymd', $dateRaw);
+    if (!$date) {
+        return null;
+    }
+
+    return [
+        'codename' => $codename,
+        'date' => $date->format('Y-m-d'),
+        'version' => $version,
+        'buildType' => $buildType,
+    ];
 }
 
 function copyRecursively($source, $dest, $jobId = null) {
