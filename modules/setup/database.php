@@ -140,6 +140,7 @@ class Database {
                 $this->pdo->exec($sql);
                 $this->migratePushReleaseQueueSchema();
                 $this->migratePushReleaseQueueUniqueness();
+                $this->migrateDownloadStatHashFreshnessColumn();
                 $this->migrateRateLimitIndexes();
             } catch (Exception $e) {
                 error_log("Cache table creation failed (may already exist): " . $e->getMessage());
@@ -166,7 +167,8 @@ class Database {
                 count INTEGER DEFAULT 0,
                 sha256 VARCHAR(64),
                 md5 VARCHAR(32),
-                file_size INTEGER
+                file_size INTEGER,
+                hash_source_modified_at INTEGER
             );
             
             -- Download statistics cache (pre-computed for fast page loads)
@@ -257,6 +259,7 @@ class Database {
         $this->pdo->exec($sql);
         $this->migratePushReleaseQueueSchema();
         $this->migratePushReleaseQueueUniqueness();
+        $this->migrateDownloadStatHashFreshnessColumn();
         $this->migrateDownloadStatsIndexes();
         $this->migrateRateLimitIndexes();
         
@@ -327,6 +330,34 @@ class Database {
             }
         } catch (Exception $e) {
             error_log('download_stats index migration skipped: ' . $e->getMessage());
+        }
+    }
+
+    private function migrateDownloadStatHashFreshnessColumn() {
+        try {
+            if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
+                $tableStmt = $this->pdo->query("SELECT COUNT(1) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'download_stat'");
+                if ((int)$tableStmt->fetchColumn() === 0) {
+                    return;
+                }
+
+                $columnStmt = $this->pdo->query("SELECT COUNT(1) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'download_stat' AND COLUMN_NAME = 'hash_source_modified_at'");
+                if ((int)$columnStmt->fetchColumn() === 0) {
+                    $this->pdo->exec("ALTER TABLE download_stat ADD COLUMN hash_source_modified_at BIGINT NULL");
+                }
+                return;
+            }
+
+            $columns = $this->pdo->query("PRAGMA table_info(download_stat)")->fetchAll();
+            foreach ($columns as $column) {
+                if (($column['name'] ?? '') === 'hash_source_modified_at') {
+                    return;
+                }
+            }
+
+            $this->pdo->exec("ALTER TABLE download_stat ADD COLUMN hash_source_modified_at INTEGER");
+        } catch (Exception $e) {
+            error_log('download_stat hash freshness migration skipped: ' . $e->getMessage());
         }
     }
 
