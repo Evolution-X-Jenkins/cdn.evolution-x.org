@@ -1,6 +1,6 @@
 # PHP File Browser V2 - Evolution X CDN
 
-A comprehensive PHP-based file browser and download management system for Evolution X ROM files, integrated with Cloudflare R2 storage and featuring advanced caching, download statistics, and push release management.
+A comprehensive PHP-based file browser and download management system for Evolution X ROM files, integrated with Bunny Storage storage and featuring advanced caching, download statistics, and push release management.
 
 ## Table of Contents
 
@@ -21,7 +21,7 @@ A comprehensive PHP-based file browser and download management system for Evolut
 
 ## Overview
 
-This application provides a web-based interface for browsing, downloading, and managing ROM files stored on Cloudflare R2 (S3-compatible storage). It includes sophisticated download tracking, multi-tier caching, push release automation, and comprehensive API endpoints for integration with external systems.
+This application provides a web-based interface for browsing, downloading, and managing ROM files stored on Bunny Storage (S3-compatible storage). It includes sophisticated download tracking, multi-tier caching, push release automation, and comprehensive API endpoints for integration with external systems.
 
 ## Key Features
 
@@ -169,7 +169,7 @@ Calculate/Fetch (and backfill all caches)
 
 **composer.json**
 - PHP dependency management
-- Dependencies: AWS SDK for PHP (Cloudflare R2/S3 compatibility)
+- Dependencies: AWS SDK for PHP (Bunny Storage/S3 compatibility)
 
 ---
 
@@ -185,7 +185,7 @@ The application is organized into modular components under the `modules/` direct
 - Application configuration and constants
 - Environment variable loading from .env
 - Path definitions (BASE_PATH, PRE_RELEASE_PATH)
-- R2/S3 configuration
+- Bunny Storage configuration
 - Database configuration (MySQL/SQLite)
 - Cache configuration (Redis, File, APCu)
 - Jenkins integration settings
@@ -204,9 +204,9 @@ The application is organized into modular components under the `modules/` direct
   - `push_release_queue`: Release deployment queue
   - `cache_entries`: Cache management
 
-**r2_download.php**
-- Cloudflare R2 integration
-- S3Client wrapper for R2 operations
+**download_backend.php**
+- Bunny Storage integration
+- S3Client wrapper for Bunny operations
 - Presigned URL generation
 - File listing and metadata retrieval
 - Direct download capabilities
@@ -249,7 +249,7 @@ The application is organized into modular components under the `modules/` direct
   - Database connectivity
   - Filesystem access (read/write)
   - Pre-release path availability
-  - R2 configuration validation
+  - Bunny configuration validation
   - PHP extension requirements
   - Push queue status
 - Returns detailed status for each component
@@ -514,7 +514,7 @@ Response format:
 - MySQL 8.0+ or SQLite 3
 - Redis (optional, recommended for production)
 - Composer
-- Cloudflare R2 account (or S3-compatible storage)
+- Bunny Storage account (or S3-compatible storage)
 
 ### PHP Extensions Required
 
@@ -552,7 +552,7 @@ Response format:
    Edit `modules/setup/config.php`:
    - Set `BASE_PATH` to your file storage location
    - Set `PRE_RELEASE_PATH` for pre-release builds
-   - Configure R2 credentials
+   - Configure Bunny credentials
    - Set database credentials
 
 6. **Set up cron jobs:**
@@ -597,11 +597,12 @@ Response format:
 ### Environment Variables (.env)
 
 ```env
-# R2/S3 Configuration
-R2_ACCOUNT_ID=your-account-id
-R2_ACCESS_KEY=your-access-key-id
-R2_SECRET_KEY=your-secret-access-key
-R2_BUCKET_NAME=your-bucket-name
+# Bunny Storage Configuration
+BUNNY_STORAGE_ZONE=your-storage-zone
+BUNNY_STORAGE_ACCESS_KEY=your-storage-access-key
+BUNNY_STORAGE_REGION=de
+BUNNY_DOWNLOAD_BASE_URL=https://downloads.example.com
+BUNNY_FALLBACK_DOMAINS=downloads-backup.example.com
 
 # Database (if using MySQL)
 DB_HOST=localhost
@@ -651,7 +652,7 @@ define('FALLBACK_DOMAINS', [
 ]);
 
 // Presigned URL expiry (seconds)
-define('PRESIGNED_URL_EXPIRY', 3600);
+define('DOWNLOAD_URL_EXPIRY', 3600);
 ```
 
 ---
@@ -1042,7 +1043,7 @@ error_reporting(E_ALL);
 1. **Use Redis** - 10-100x faster than file cache
 2. **Enable APCu** - Additional in-process caching
 3. **MySQL over SQLite** - Better for high concurrency
-4. **CDN/R2** - Offload file serving to Cloudflare
+4. **CDN/Bunny** - Offload file serving to Bunny
 5. **Optimize Cron** - Run during low-traffic periods
 6. **Index Database** - Ensure all foreign keys are indexed
 7. **Use Connection Pooling** - For MySQL connections
@@ -1084,7 +1085,7 @@ error_reporting(E_ALL);
 ## Acknowledgments
 
 - **Evolution X Team** - For the ROM and infrastructure
-- **Cloudflare** - For R2 storage
+- **Bunny** - For Bunny storage
 - **AWS SDK for PHP** - For S3 compatibility
 - **Redis** - For caching excellence
 
@@ -1106,7 +1107,7 @@ error_reporting(E_ALL);
 - Initial release
 - Basic file browsing
 - Download tracking
-- R2 integration
+- Bunny integration
 
 ---
 

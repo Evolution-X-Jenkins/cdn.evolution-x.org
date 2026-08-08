@@ -82,7 +82,7 @@ sudo yum install -y php php-fpm php-cli php-mysqlnd php-pdo \
 - [ ] Redis installed (optional)
 - [ ] Web server installed (Nginx/Apache)
 - [ ] SSL certificate obtained (Let's Encrypt recommended)
-- [ ] Cloudflare R2 credentials ready
+- [ ] Bunny Storage credentials ready
 - [ ] Push API token generated
 - [ ] Backup strategy planned
 - [ ] Monitoring solution ready

@@ -1,30 +1,25 @@
 <?php
 /**
- * Configuration and shared functions
+ * Bunny-first configuration example
  */
 
-// Load composer autoload for AWS SDK
 require_once __DIR__ . '/../../vendor/autoload.php';
 
-use Aws\S3\S3Client;
-use Aws\Exception\AwsException;
-
-// Load .env file if it exists
 function load_env($file = '.env') {
     if (!file_exists($file)) {
         return;
     }
-    
+
     $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     foreach ($lines as $line) {
-        if (strpos($line, '#') === 0 || !strpos($line, '=')) {
+        if (strpos($line, '#') === 0 || strpos($line, '=') === false) {
             continue;
         }
-        
-        list($key, $value) = explode('=', $line, 2);
+
+        [$key, $value] = explode('=', $line, 2);
         $key = trim($key);
         $value = trim($value);
-        
+
         if (!array_key_exists($key, $_SERVER) && !array_key_exists($key, $_ENV)) {
             putenv("$key=$value");
             $_ENV[$key] = $value;
@@ -32,450 +27,47 @@ function load_env($file = '.env') {
     }
 }
 
-// Load environment variables
 load_env();
 
-// Configuration
-define('BASE_PATH', '/mnt/main-mount');  // Change to your mount point
-define('PRE_RELEASE_PATH', '/mnt/pre-release'); // Change to your pre-release mount point
-define('SITE_TITLE', 'R2 File Browser');
+// Core paths
+define('BASE_PATH', '/mnt/evolution-x');
+define('PRE_RELEASE_PATH', '/mnt/pre-release');
+define('SITE_TITLE', 'Bunny File Browser');
 
-// Ensure directories exist
-if (!is_dir(BASE_PATH)) {
-    mkdir(BASE_PATH, 0755, true);
-}
+// Bunny storage configuration
+define('BUNNY_STORAGE_ZONE', getenv('BUNNY_STORAGE_ZONE') ?: 'your-storage-zone');
+define('BUNNY_STORAGE_ACCESS_KEY', getenv('BUNNY_STORAGE_ACCESS_KEY') ?: 'your-storage-access-key');
+define('BUNNY_STORAGE_REGION', strtolower((string)(getenv('BUNNY_STORAGE_REGION') ?: 'de')));
+define('BUNNY_DOWNLOAD_BASE_URL', trim((string)(getenv('BUNNY_DOWNLOAD_BASE_URL') ?: 'https://downloads.example.com')));
+define('BUNNY_FALLBACK_DOMAINS', array_values(array_filter(array_map('trim', explode(',', (string)(getenv('BUNNY_FALLBACK_DOMAINS') ?: ''))), static function ($value) {
+    return $value !== '';
+})));
+define('DOWNLOAD_URL_EXPIRY', 3600);
 
-if (!is_dir(PRE_RELEASE_PATH)) {
-    mkdir(PRE_RELEASE_PATH, 0755, true);
-}
+// Database configuration
+define('DB_TYPE', getenv('DB_TYPE') ?: 'mysql');
+define('DB_HOST', getenv('DB_HOST') ?: 'localhost');
+define('DB_PORT', (int)(getenv('DB_PORT') ?: 3306));
+define('DB_NAME', getenv('DB_NAME') ?: 'filebrowser');
+define('DB_USER', getenv('DB_USER') ?: 'filebrowser');
+define('DB_PASS', getenv('DB_PASS') ?: 'change-me');
+define('DB_CHARSET', getenv('DB_CHARSET') ?: 'utf8mb4');
 
-// R2 Configuration
-define('R2_ACCOUNT_ID', getenv('R2_ACCOUNT_ID') ?: 'your-account-id');
-define('R2_ACCESS_KEY', getenv('R2_ACCESS_KEY') ?: 'your-access-key');
-define('R2_SECRET_KEY', getenv('R2_SECRET_KEY') ?: 'your-secret-key');
-define('R2_BUCKET_NAME', getenv('R2_BUCKET_NAME') ?: 'your-bucket-name');
-define('R2_REGION', 'auto');
-define('LOG_FILE', __DIR__ . '/logs/app.log');
+// Cache/log basics
+define('LOGS_DIR', __DIR__ . '/../../logs');
+define('CACHE_FILE_DIR', __DIR__ . '/../../data/cache');
+define('CACHE_REDIS_ENABLED', true);
+define('CACHE_REDIS_SOCKET', '/var/run/redis/redis.sock');
+define('CACHE_REDIS_HOST', 'localhost');
+define('CACHE_REDIS_PORT', 6379);
+define('CACHE_REDIS_PASSWORD', '');
+define('DOWNLOAD_STATS_CACHE_TTL', 120);
 
-// Jenkins Configuration (optional - set to false to disable)
-define('JENKINS_URL', false); // e.g., 'https://your-jenkins-server.com'
-
-// Fallback download domains for users who can't access CloudFlare directly
-// These should point to the same R2 bucket content
-define('FALLBACK_DOMAINS', [
-    'domain1.com',
-    'domain2.com',
-    'domain3.com'
-]);
-
-// Listing manifest configuration
-define('LISTING_HIDDEN_NAMES', [
-    '.bash_history',
-    '.cache',
-    '.config',
-]);
+define('LISTING_HIDDEN_NAMES', ['.bash_history', '.cache', '.config']);
 define('LISTING_MANIFEST_DIR', __DIR__ . '/../../data/manifests');
 define('LISTING_MANIFEST_FILE', LISTING_MANIFEST_DIR . '/current.json');
 define('LISTING_MANIFEST_STATUS_FILE', LISTING_MANIFEST_DIR . '/status.json');
 define('LISTING_MANIFEST_ARCHIVE_DIR', LISTING_MANIFEST_DIR . '/archive');
 define('LISTING_ENABLE_DB_FALLBACK', true);
 define('LISTING_ENABLE_LIVE_SCAN_FALLBACK', true);
-define('LISTING_MANIFEST_CACHE_TTL', 1800); // 30 minutes
-// Default presigned URL expiry (in seconds)
-define('PRESIGNED_URL_EXPIRY', 3600); // 1 hour
-
-// Security: Ensure we stay within the base path
-function sanitize_path($path, $base_path) {
-    if (empty($path)) {
-        return realpath($base_path);
-    }
-    
-    $real_base = realpath($base_path);
-    $test_path = $base_path . '/' . $path;
-    
-    // Check if path exists
-    if (!file_exists($test_path)) {
-        return $real_base;
-    }
-    
-    $real_path = realpath($test_path);
-    
-    // If path is outside base path, return base path
-    if (!$real_path || strpos($real_path, $real_base) !== 0) {
-        return $real_base;
-    }
-    
-    return $real_path;
-}
-
-// Function to format file size
-function format_size($bytes) {
-    $units = array('B', 'KB', 'MB', 'GB', 'TB');
-    $bytes = max($bytes, 0);
-    $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
-    $pow = min($pow, count($units) - 1);
-    $bytes /= pow(1024, $pow);
-    return round($bytes, 2) . ' ' . $units[$pow];
-}
-
-// Generate breadcrumb navigation
-function generate_breadcrumb($path) {
-    $parts = array_filter(explode('/', $path));
-    $breadcrumb = array();
-    $current = '';
-    
-    // Add root
-    $breadcrumb[] = array('name' => 'Home', 'path' => '/');
-    
-    // Add each part
-    foreach ($parts as $part) {
-        $current .= '/' . $part;
-        $breadcrumb[] = array('name' => $part, 'path' => $current);
-    }
-    
-    return $breadcrumb;
-}
-
-// Get file extension for icon
-function get_file_icon($filename, $is_dir) {
-    if ($is_dir) {
-        return get_folder_icon();
-    }
-    
-    $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-    
-    switch ($ext) {
-        case 'zip':
-        case 'rar':
-        case '7z':
-        case 'tar':
-        case 'gz':
-            return get_archive_icon();
-        case 'img':
-        case 'iso':
-        case 'dmg':
-            return get_disc_icon();
-        case 'apk':
-            return get_apk_icon();
-        case 'json':
-        case 'xml':
-        case 'yml':
-        case 'yaml':
-        case 'ini':
-        case 'conf':
-            return get_config_icon();
-        case 'md':
-        case 'txt':
-        case 'log':
-        case 'readme':
-            return get_text_icon();
-        case 'png':
-        case 'jpg':
-        case 'jpeg':
-        case 'gif':
-        case 'bmp':
-        case 'svg':
-        case 'webp':
-            return get_image_icon();
-        case 'mp4':
-        case 'mkv':
-        case 'avi':
-        case 'mov':
-        case 'wmv':
-        case 'flv':
-            return get_video_icon();
-        case 'mp3':
-        case 'flac':
-        case 'wav':
-        case 'ogg':
-        case 'm4a':
-            return get_audio_icon();
-        case 'pdf':
-            return get_pdf_icon();
-        case 'doc':
-        case 'docx':
-        case 'odt':
-            return get_document_icon();
-        case 'xls':
-        case 'xlsx':
-        case 'ods':
-        case 'csv':
-            return get_spreadsheet_icon();
-        case 'ppt':
-        case 'pptx':
-        case 'odp':
-            return get_presentation_icon();
-        case 'js':
-        case 'ts':
-        case 'jsx':
-        case 'tsx':
-            return get_javascript_icon();
-        case 'py':
-            return get_python_icon();
-        case 'php':
-            return get_php_icon();
-        case 'html':
-        case 'htm':
-            return get_html_icon();
-        case 'css':
-        case 'scss':
-        case 'sass':
-        case 'less':
-            return get_css_icon();
-        default:
-            return get_file_icon_default();
-    }
-}
-
-function get_folder_icon() {
-    return '<svg class="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 00-1.883 2.542l.857 6a2.25 2.25 0 002.227 1.932H19.05a2.25 2.25 0 002.227-1.932l.857-6a2.25 2.25 0 00-1.883-2.542m-16.5 0V6A2.25 2.25 0 016 3.75h3.879a1.125 1.125 0 01.966.542l.818 1.364a2.25 2.25 0 001.932 1.094H18A2.25 2.25 0 0120.25 9v.776" />
-    </svg>';
-}
-
-function get_archive_icon() {
-    return '<svg class="w-5 h-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-    </svg>';
-}
-
-function get_disc_icon() {
-    return '<svg class="w-5 h-5 text-purple-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <circle cx="12" cy="12" r="10" stroke-linecap="round" stroke-linejoin="round" />
-        <circle cx="12" cy="12" r="3" stroke-linecap="round" stroke-linejoin="round" />
-        <circle cx="12" cy="12" r="1" fill="currentColor" />
-    </svg>';
-}
-
-function get_apk_icon() {
-    return '<svg class="w-5 h-5 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" />
-    </svg>';
-}
-
-function get_config_icon() {
-    return '<svg class="w-5 h-5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
-        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-    </svg>';
-}
-
-function get_text_icon() {
-    return '<svg class="w-5 h-5 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5-3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-    </svg>';
-}
-
-function get_image_icon() {
-    return '<svg class="w-5 h-5 text-pink-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909M18 12.75V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18V9A2.25 2.25 0 0 1 6 6.75h1.5l2.25-3h3l2.25 3H18A2.25 2.25 0 0 1 20.25 9v3.75" />
-    </svg>';
-}
-
-function get_video_icon() {
-    return '<svg class="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" />
-    </svg>';
-}
-
-function get_audio_icon() {
-    return '<svg class="w-5 h-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="m9 9 10.5-3m0 6.553v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 1 1-.99-3.467l2.31-.66a2.25 2.25 0 0 0 1.632-2.163Zm0 0V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 0 1-.99-3.467l2.31-.66A2.25 2.25 0 0 0 9 15.553Z" />
-    </svg>';
-}
-
-function get_pdf_icon() {
-    return '<svg class="w-5 h-5 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-    </svg>';
-}
-
-function get_document_icon() {
-    return '<svg class="w-5 h-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-    </svg>';
-}
-
-function get_spreadsheet_icon() {
-    return '<svg class="w-5 h-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h1.5C5.496 19.5 6 18.996 6 18.375m-3.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625a1.125 1.125 0 0 0 1.125-1.125m-1.125 1.125h-1.5A1.125 1.125 0 0 1 18 18.375m3.75 0v-7.5a1.125 1.125 0 0 0-1.125-1.125H18m3.75 1.5V5.625m0 0V4.125a1.125 1.125 0 0 0-1.125-1.125H3.375A1.125 1.125 0 0 0 2.25 4.125v1.5m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125H18" />
-    </svg>';
-}
-
-function get_presentation_icon() {
-    return '<svg class="w-5 h-5 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3v11.25A2.25 2.25 0 0 0 6 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0 1 18 16.5h-2.25m-7.5 0h7.5m-7.5 0-1 3m8.5-3 1 3m0 0-1-3m1 3-1-3m-9-1.5h.008v.008H12v-.008Z" />
-    </svg>';
-}
-
-function get_javascript_icon() {
-    return '<svg class="w-5 h-5 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" />
-    </svg>';
-}
-
-function get_python_icon() {
-    return '<svg class="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" />
-    </svg>';
-}
-
-function get_php_icon() {
-    return '<svg class="w-5 h-5 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" />
-    </svg>';
-}
-
-function get_html_icon() {
-    return '<svg class="w-5 h-5 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" />
-    </svg>';
-}
-
-function get_css_icon() {
-    return '<svg class="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12a7.5 7.5 0 0 0 15 0m-15 0a7.5 7.5 0 1 1 15 0m-15 0H3m16.5 0H21m-1.5 0H12m-8.457 3.077 1.41-.513m14.095-5.13 1.41-.513M5.106 17.785l1.15-.964m11.49-9.642 1.149-.964M7.501 19.795l.75-1.3m7.5-12.99.75-1.3m-6.063 16.658.26-1.477m2.605-14.772.26-1.477m0 17.726-.26-1.477M10.698 4.614l-.26-1.477M16.5 19.794l-.75-1.299M7.5 4.205 12 12m6.894 5.785-1.149-.964M6.256 7.178l-1.15-.964m15.352 8.864-1.41-.513M4.954 9.435l-1.41-.514M12.002 12l-3.75 6.495a7.5 7.5 0 0 0 7.5 0L12.002 12Z" />
-    </svg>';
-}
-
-function get_file_icon_default() {
-    return '<svg class="w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5-3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-    </svg>';
-}
-
-// Generate random user ID
-function generate_user_id() {
-    $characters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    $user_id = '';
-    for ($i = 0; $i < 24; $i++) {
-        $user_id .= $characters[random_int(0, strlen($characters) - 1)];
-    }
-    return $user_id;
-}
-
-// Get or create user ID
-function get_user_id() {
-    if (isset($_COOKIE['user_id']) && strlen($_COOKIE['user_id']) === 24) {
-        return $_COOKIE['user_id'];
-    }
-    
-    $user_id = generate_user_id();
-    setcookie('user_id', $user_id, time() + (365 * 24 * 60 * 60), '/', '', false, true); // 1 year, httpOnly
-    return $user_id;
-}
-
-// Get client IP address
-function get_client_ip() {
-    if (!empty($_SERVER['HTTP_CLIENT_IP'])) {
-        return $_SERVER['HTTP_CLIENT_IP'];
-    } elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-        return $_SERVER['HTTP_X_FORWARDED_FOR'];
-    } elseif (!empty($_SERVER['HTTP_X_FORWARDED'])) {
-        return $_SERVER['HTTP_X_FORWARDED'];
-    } elseif (!empty($_SERVER['HTTP_FORWARDED_FOR'])) {
-        return $_SERVER['HTTP_FORWARDED_FOR'];
-    } elseif (!empty($_SERVER['HTTP_FORWARDED'])) {
-        return $_SERVER['HTTP_FORWARDED'];
-    } else {
-        return $_SERVER['REMOTE_ADDR'];
-    }
-}
-
-// R2 Utilities
-function get_r2_endpoint($use_fallback_domain = false) {
-    // Check if we should use a fallback domain (user preference from connectivity test)
-    if ($use_fallback_domain && defined('FALLBACK_DOMAINS') && !empty(FALLBACK_DOMAINS)) {
-        // Use first available fallback domain
-        return 'https://' . FALLBACK_DOMAINS[0];
-    }
-    
-    // Default to standard R2 endpoint using path-style
-    return 'https://' . R2_ACCOUNT_ID . '.r2.cloudflarestorage.com'; 
-}
-
-function get_s3_client() {
-    static $client = null;
-    
-    if ($client === null) {
-        $client = new S3Client([
-            'version' => 'latest',
-            'region' => R2_REGION,
-            'endpoint' => 'https://' . R2_ACCOUNT_ID . '.r2.cloudflarestorage.com',
-            'credentials' => [
-                'key' => R2_ACCESS_KEY,
-                'secret' => R2_SECRET_KEY,
-            ],
-            'use_path_style_endpoint' => true,
-        ]);
-    }
-    
-    return $client;
-}
-
-function generate_presigned_url($object_key, $expiry_seconds = null, $use_fallback_domain = false) {
-    if ($expiry_seconds === null) {
-        $expiry_seconds = PRESIGNED_URL_EXPIRY;
-    }
-    
-    // Clean object key (remove leading slash)
-    $object_key = ltrim($object_key, '/');
-    
-    try {
-        $s3Client = get_s3_client();
-        
-        $command = $s3Client->getCommand('GetObject', [
-            'Bucket' => R2_BUCKET_NAME,
-            'Key' => $object_key
-        ]);
-        
-        $presignedUrl = $s3Client->createPresignedRequest($command, '+' . $expiry_seconds . ' seconds')->getUri();
-        
-        return (string) $presignedUrl;
-        
-    } catch (AwsException $e) {
-        error_log('AWS SDK Error generating presigned URL: ' . $e->getMessage());
-        
-        // Fallback: return a simple direct URL
-        $endpoint = get_r2_endpoint($use_fallback_domain);
-        return $endpoint . '/' . R2_BUCKET_NAME . '/' . $object_key;
-    }
-}
-
-function should_use_fallback_domain() {
-    // Check user preference from download method detector
-    // This would be set by the JavaScript connectivity test
-    return isset($_COOKIE['download_method_preference']) && $_COOKIE['download_method_preference'] === 'fallback';
-}
-
-// Log user action
-function log_action($action, $path = '') {
-    // Ensure log directory exists
-    $log_dir = dirname(LOG_FILE);
-    if (!file_exists($log_dir)) {
-        mkdir($log_dir, 0755, true);
-    }
-    
-    $user_id = get_user_id();
-    $ip_address = get_client_ip();
-    $timestamp = date('Y-m-d H:i:s');
-    $log_entry = "[{$timestamp}] [{$ip_address}] [{$user_id}] {$action}";
-    
-    if (!empty($path)) {
-        $log_entry .= " - {$path}";
-    }
-    
-    // Write to both file and error_log
-    file_put_contents(LOG_FILE, $log_entry . "\n", FILE_APPEND | LOCK_EX);
-    error_log($log_entry);
-}
-
-function format_file_size($bytes) {
-    if ($bytes == 0) return '0 B';
-    
-    $units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-    $pow = min(floor(log($bytes) / log(1024)), count($units) - 1);
-    
-    return round($bytes / (1024 ** $pow), 2) . ' ' . $units[$pow];
-}
-?>
+define('LISTING_MANIFEST_CACHE_TTL', 1800);

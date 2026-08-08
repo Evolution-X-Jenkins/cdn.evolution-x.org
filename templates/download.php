@@ -84,8 +84,8 @@ async function startDownload() {
       }
     }
     
-    // Try regular R2 download
-    console.log('Attempting R2 download...');
+    // Try direct Bunny download
+    console.log('Attempting direct download...');
     const downloadUrl = '/<?php echo addslashes($file_path); ?>/download';
     
     // Create hidden iframe for download
@@ -95,18 +95,18 @@ async function startDownload() {
     
     // Handle iframe errors (indicates download failure)
     iframe.onerror = () => {
-      console.log('R2 download failed via iframe error');
+      console.log('Direct download failed via iframe error');
       if (window.downloadDetector) {
-        window.downloadDetector.reportPresignedFailure();
+        window.downloadDetector.reportDirectFailure();
       }
       fallbackToProxy();
     };
     
     // Set a timeout to detect if download doesn't start
     const failureTimeout = setTimeout(() => {
-      console.log('R2 download timeout - assuming failure');
+      console.log('Direct download timeout - assuming failure');
       if (window.downloadDetector) {
-        window.downloadDetector.reportPresignedFailure();
+        window.downloadDetector.reportDirectFailure();
       }
       fallbackToProxy();
     }, 15000); // 15 second timeout
@@ -118,15 +118,15 @@ async function startDownload() {
       clearTimeout(failureTimeout);
       checkDownloadStarted();
       
-      // Report success for R2 downloads
+      // Report success for direct downloads
       if (window.downloadDetector) {
         setTimeout(() => {
-          window.downloadDetector.reportPresignedSuccess();
+          window.downloadDetector.reportDirectSuccess();
         }, 3000);
       }
     }, 2000);
     
-    console.log('Download started with R2 method');
+    console.log('Download started with direct method');
     
   } catch (error) {
     console.error('Error in startDownload:', error);

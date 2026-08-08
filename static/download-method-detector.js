@@ -1,26 +1,28 @@
 /**
  * Download Method Detector - Simple Connectivity Testing
- * Tests basic connectivity to CloudFlare domains without file access
+ * Tests basic connectivity to Bunny download domains without file access
  */
 
 class DownloadMethodDetector {
     constructor() {
         this.CACHE_KEY = 'downloadMethodTest';
         this.CACHE_DURATION = 3600000; // 1 hour
-        this.CF_DOMAINS = [
-            'e47b8ab6487c7271956f83661e6ac050.r2.cloudflarestorage.com',
-            'pub-3626123a908346a7a8be8d9295f44e26.r2.dev',
-            'evo-dl.ndts-storage.uk'
-        ];
+        const configuredDomains = Array.isArray(window.BUNNY_DOWNLOAD_DOMAINS)
+            ? window.BUNNY_DOWNLOAD_DOMAINS.filter(domain => typeof domain === 'string' && domain.trim() !== '')
+            : [];
+
+        this.BUNNY_DOMAINS = configuredDomains.length > 0
+            ? configuredDomains
+            : [window.location.hostname];
     }
     
     /**
-     * Test basic connectivity to CloudFlare domains
+     * Test basic connectivity to Bunny domains
      */
-    async testCloudFlareConnectivity() {
+    async testDirectConnectivity() {
         let anyWorking = false;
         
-        for (const domain of this.CF_DOMAINS) {
+        for (const domain of this.BUNNY_DOMAINS) {
             try {
                 // Try a simple request to test connectivity
                 // Note: 400/404 responses still mean the domain is reachable
@@ -33,12 +35,12 @@ class DownloadMethodDetector {
                 // With no-cors, any response (including errors) means domain is reachable
                 // The key is that we don't get a network error (DNS/connection failure)
                 anyWorking = true;
-                console.log(`✅ CloudFlare domain ${domain} is reachable (connectivity confirmed)`);
+                console.log(`✅ Bunny domain ${domain} is reachable (connectivity confirmed)`);
                 break;
                 
             } catch (error) {
                 // Only true network errors (DNS, connection timeout, etc.) end up here
-                console.log(`❌ CloudFlare domain ${domain} failed:`, error.message);
+                console.log(`❌ Bunny domain ${domain} failed:`, error.message);
                 continue;
             }
         }
@@ -103,27 +105,27 @@ class DownloadMethodDetector {
         console.log('Testing download method connectivity...');
         console.log('ℹ️ Note: 400/404 HTTP errors are normal and expected - they indicate the domain is reachable');
         
-        const [cfConnectivity, proxyAvailability] = await Promise.all([
-            this.testCloudFlareConnectivity(),
+        const [directConnectivity, proxyAvailability] = await Promise.all([
+            this.testDirectConnectivity(),
             this.testProxyAvailability()
         ]);
         
         const results = {
-            presigned_available: cfConnectivity,
+            direct_available: directConnectivity,
             proxy_available: proxyAvailability,
-            recommended_method: 'presigned', // Default
+            recommended_method: 'direct',
             test_timestamp: Date.now()
         };
         
         // Determine best method
-        if (cfConnectivity && proxyAvailability) {
-            results.recommended_method = 'presigned'; // Prefer faster option
-        } else if (cfConnectivity) {
-            results.recommended_method = 'presigned';
+        if (directConnectivity && proxyAvailability) {
+            results.recommended_method = 'direct'; // Prefer faster option
+        } else if (directConnectivity) {
+            results.recommended_method = 'direct';
         } else if (proxyAvailability) {
             results.recommended_method = 'proxy';
         } else {
-            results.recommended_method = 'presigned'; // Fallback
+            results.recommended_method = 'direct';
         }
         
         console.log('Connectivity test results:', results);
@@ -217,12 +219,20 @@ class DownloadMethodDetector {
      * Report actual download failure for learning
      */
     reportDownloadFailure(method) {
-        if (method === 'presigned') {
-            console.log('Presigned download failed, updating preference...');
+        if (method === 'direct') {
+            console.log('Direct download failed, updating preference...');
             // Clear cache to force re-test, and set proxy preference
             localStorage.removeItem(this.CACHE_KEY);
             this.setServerPreference('proxy');
         }
+    }
+
+    reportDirectSuccess() {
+        this.setCookie('download_method_preference', '', -1);
+    }
+
+    reportDirectFailure() {
+        this.setCookie('download_method_preference', 'fallback', 24 * 60 * 60);
     }
 }
 

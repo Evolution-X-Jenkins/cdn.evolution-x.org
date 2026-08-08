@@ -1,7 +1,7 @@
 <?php
 /**
  * Health Status Handler
- * Shows system status including Jenkins, R2, and other services
+ * Shows system status including Jenkins, Bunny downloads, and other services
  */
 
 require_once __DIR__ . '/../setup/config.php';
@@ -13,7 +13,7 @@ function show_health_page() {
     // Check various system components
     $health_checks = [
         'local_identifiers' => check_local_identifiers(),
-        'r2' => check_r2_status(),
+        'downloads' => check_download_status(),
         'jenkins' => check_jenkins_status(),
         'bucket' => check_bucket_status(),
         'push_queue' => check_push_queue_status()
@@ -155,38 +155,41 @@ function format_time_ago_for_health($epoch): string {
     return intdiv($delta, 86400) . ' days ago';
 }
 
-function check_r2_status() {
+function check_download_status() {
     try {
-        // Test download URL generation
-        $test_file = 'test-file.txt'; // This doesn't need to exist for URL generation
-        $primary_url = generate_presigned_url($test_file, false);
-        $proxy_url = generate_presigned_url($test_file, true);
+        // Test Bunny download URL generation
+        $test_file = 'test-file.txt'; // This does not need to exist for URL generation
+        $primary_url = generate_download_url($test_file, DOWNLOAD_URL_EXPIRY, false);
+        $fallback_url = generate_download_url($test_file, DOWNLOAD_URL_EXPIRY, true);
         
         $using_proxy = false;
-        // Simple connectivity test - in real usage this would be more sophisticated
         $context = stream_context_create([
             'http' => ['timeout' => 3, 'method' => 'HEAD']
         ]);
-        
-        // Test primary URL connectivity
-        $primary_works = @get_headers(get_r2_endpoint(), 1, $context) !== false;
+
+        $probeUrl = $primary_url ?: $fallback_url;
+        if ($probeUrl === null) {
+            throw new RuntimeException('No Bunny download base URL configured');
+        }
+
+        $primary_works = @get_headers($probeUrl, 1, $context) !== false;
         if (!$primary_works) {
             $using_proxy = true;
         }
-        
+
         return [
-            'name' => 'CloudFlare R2 Downloads',
+            'name' => 'Bunny Downloads',
             'status' => 'healthy',
             'message' => $using_proxy ? 'Using proxy URLs' : 'Direct URLs working',
             'details' => [
                 'Connection' => $using_proxy ? 'Proxy' : 'Direct',
-                'Bucket' => R2_BUCKET_NAME,
-                'Fallback Available' => 'Yes'
+                'Primary URL' => $primary_url ?: 'not configured',
+                'Fallback URL' => $fallback_url ?: 'not configured'
             ]
         ];
     } catch (Exception $e) {
         return [
-            'name' => 'CloudFlare R2 Downloads',
+            'name' => 'Bunny Downloads',
             'status' => 'error',
             'message' => 'Download URL generation failed: ' . $e->getMessage(),
             'details' => []

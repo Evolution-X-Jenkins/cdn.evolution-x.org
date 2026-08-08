@@ -433,13 +433,13 @@ try {
 // 5. Health check
 log_message("Performing health checks...");
 try {
-    // Test R2 connectivity
-    if (function_exists('generate_presigned_url')) {
-        $test_url = generate_presigned_url('health-test.txt', 60);
+    // Test Bunny download URL generation
+    if (function_exists('generate_download_url')) {
+        $test_url = generate_download_url('health-test.txt', 60, false);
         if ($test_url) {
-            log_message("R2 connectivity: OK");
+            log_message("Bunny download URL generation: OK");
         } else {
-            log_message("WARNING: R2 URL generation failed");
+            log_message("WARNING: Bunny download URL generation failed");
         }
     }
     

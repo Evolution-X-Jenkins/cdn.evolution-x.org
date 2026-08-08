@@ -29,7 +29,19 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,300..800;1,300..800&display=swap" rel="stylesheet">
+    <?php
+    $bunnyDownloadDomains = [];
+    if (function_exists('get_bunny_download_base_url')) {
+        $baseUrl = get_bunny_download_base_url(false);
+        $baseHost = parse_url((string)$baseUrl, PHP_URL_HOST);
+        if (is_string($baseHost) && $baseHost !== '') {
+            $bunnyDownloadDomains[] = $baseHost;
+        }
+    }
+    ?>
     <script>
+        window.BUNNY_DOWNLOAD_DOMAINS = <?php echo json_encode(array_values(array_unique($bunnyDownloadDomains))); ?>;
+
         // Simple downloadDetector implementation
         window.downloadDetector = {
             async testDomain(domain, timeout = 5000) {
@@ -54,38 +66,36 @@
                 if (preference === 'fallback') {
                     return {
                         recommended_method: 'proxy',
-                        presigned_available: false,
+                        direct_available: false,
                         reason: 'user_preference'
                     };
                 }
                 
-                // Test primary CloudFlare domains
-                const domains = [
-                    'pub-a81259bbcab24b7697844a1f30bf4cde.r2.dev',
-                    'cloudflare.com'
-                ];
+                // Test configured Bunny/public domains.
+                const configuredDomains = Array.isArray(window.BUNNY_DOWNLOAD_DOMAINS) ? window.BUNNY_DOWNLOAD_DOMAINS : [];
+                const domains = configuredDomains.length > 0 ? configuredDomains : [window.location.hostname];
                 
-                let presignedAvailable = false;
+                let directAvailable = false;
                 for (const domain of domains) {
                     if (await this.testDomain(domain, 3000)) {
-                        presignedAvailable = true;
+                        directAvailable = true;
                         break;
                     }
                 }
                 
                 return {
-                    recommended_method: presignedAvailable ? 'presigned' : 'proxy',
-                    presigned_available: presignedAvailable,
-                    reason: presignedAvailable ? 'connectivity_ok' : 'connectivity_restricted'
+                    recommended_method: directAvailable ? 'direct' : 'proxy',
+                    direct_available: directAvailable,
+                    reason: directAvailable ? 'connectivity_ok' : 'connectivity_restricted'
                 };
             },
             
-            reportPresignedSuccess() {
+            reportDirectSuccess() {
                 // Remove fallback preference on success
                 this.setCookie('download_method_preference', '', -1);
             },
             
-            reportPresignedFailure() {
+            reportDirectFailure() {
                 // Set fallback preference for future downloads
                 this.setCookie('download_method_preference', 'fallback', 24 * 60 * 60);
             },
@@ -273,9 +283,9 @@
                         
                         <div class="space-y-3">
                             <div class="border-l-2 border-yellow-500/50 pl-3">
-                                <h4 class="text-white font-prodsansbold text-sm">cf_clearance</h4>
-                                <p class="text-gray-400 text-xs">Set by Cloudflare for DDoS protection and bot detection. Required for site access.</p>
-                                <p class="text-gray-500 text-xs mt-1">Duration: Variable (managed by Cloudflare)</p>
+                                <h4 class="text-white font-prodsansbold text-sm">download_method_preference</h4>
+                                <p class="text-gray-400 text-xs">Stores whether your browser should prefer direct download URLs or proxy mode for connectivity compatibility.</p>
+                                <p class="text-gray-500 text-xs mt-1">Duration: Up to 24 hours</p>
                             </div>
                         </div>
                     </div>

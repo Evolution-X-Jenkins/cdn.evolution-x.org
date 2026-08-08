@@ -1,6 +1,6 @@
 <?php
 /**
- * PHP File Browser for R2 Directory
+ * PHP File Browser for Bunny Directory
  * Main router with clean URLs and modular structure
  */
 
@@ -142,13 +142,13 @@ if ($is_download) {
     }
 }
 
-// Handle direct download requests - immediate R2 redirect
+// Handle direct download requests - immediate Bunny redirect
 if ($is_direct_download) {
-    require_once 'modules/setup/r2_download.php';
+    require_once 'modules/setup/download_backend.php';
     $file_path = sanitize_path($target_file, BASE_PATH);
     if (is_file($file_path)) {
         log_action('Direct download requested', $target_file);
-        redirect_to_r2($target_file, false); // false = regular R2 download
+        redirect_to_download_backend($target_file, false); // false = regular Bunny download
         exit;
     } else {
         log_action('Direct download failed - file not found', $target_file);
@@ -160,11 +160,11 @@ if ($is_direct_download) {
 
 // Handle proxy download requests
 if ($is_proxy_download) {
-    require_once 'modules/setup/r2_download.php';
+    require_once 'modules/setup/download_backend.php';
     $file_path = sanitize_path($target_file, BASE_PATH);
     if (is_file($file_path)) {
         log_action('Proxy download requested', $target_file);
-        redirect_to_r2($target_file, true); // true = use fallback/proxy
+        redirect_to_download_backend($target_file, true); // true = use fallback/proxy
         exit;
     } else {
         log_action('Proxy download failed - file not found', $target_file);

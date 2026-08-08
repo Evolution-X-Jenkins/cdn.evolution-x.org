@@ -58,7 +58,7 @@ Technical architecture and design decisions for PHP File Browser V2.
         ▼                 ▼                 ▼
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
 │ Redis Cache  │  │   Database   │  │ File Storage │
-│  (Tier 1)    │  │ MySQL/SQLite │  │  (R2/Local)  │
+│  (Tier 1)    │  │ MySQL/SQLite │  │  (Bunny/Local)  │
 └──────────────┘  └──────────────┘  └──────────────┘
         │
         ▼
@@ -76,7 +76,7 @@ Technical architecture and design decisions for PHP File Browser V2.
 | **Controllers** | Business logic, data processing, response formatting |
 | **Models** | Data access, database operations, validation |
 | **Cache** | Performance optimization, data persistence |
-| **Storage** | File operations, R2 integration |
+| **Storage** | File operations, Bunny integration |
 | **Queue** | Async job processing, long-running tasks |
 
 ---
@@ -206,7 +206,7 @@ API Request → Queue → Background Worker → Callback
 **Files:**
 - `config.php` - Application configuration
 - `database.php` - Database abstraction layer
-- `r2_download.php` - R2/S3 client wrapper
+- `download_backend.php` - Bunny Storage client wrapper
 
 **Pattern:** Singleton for database connections
 
@@ -271,7 +271,7 @@ API Request → Queue → Background Worker → Callback
    ↓
 4. Record download in database
    ↓
-5. Generate presigned R2 URL (if using R2)
+5. Generate direct Bunny download URL
    ↓
 6. Redirect to download URL
    ↓
@@ -787,7 +787,7 @@ if (in_array($_SERVER['HTTP_ORIGIN'], $allowedOrigins)) {
    - Can scale Redis with clustering
 
 3. **File Storage:**
-   - Already using R2 (distributed)
+   - Already using Bunny (distributed)
    - Stateless file serving
 
 4. **Queue Workers:**
@@ -892,12 +892,12 @@ error_log("Operation took: {$duration}s");
 - Storage overhead
 - Benefit: Query performance (100x faster)
 
-### Why Cloudflare R2?
+### Why Bunny Storage?
 
 **Alternatives:**
 - AWS S3: More expensive
 - Local storage: Not scalable
-- **R2 (chosen)**: S3-compatible, free egress
+- **Bunny (chosen)**: S3-compatible, free egress
 
 **Rationale:**
 - Cost-effective for CDN

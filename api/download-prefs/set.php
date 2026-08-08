@@ -21,9 +21,9 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 $input = json_decode(file_get_contents('php://input'), true);
 
-if (!isset($input['method']) || !in_array($input['method'], ['presigned', 'proxy', 'fallback'])) {
+if (!isset($input['method']) || !in_array($input['method'], ['direct', 'proxy', 'fallback'])) {
     http_response_code(400);
-    echo json_encode(['error' => 'Invalid method. Must be presigned, proxy, or fallback']);
+    echo json_encode(['error' => 'Invalid method. Must be direct, proxy, or fallback']);
     exit;
 }
 
@@ -40,7 +40,7 @@ if ($method === 'proxy' || $method === 'fallback') {
 echo json_encode([
     'success' => true,
     'method' => $method,
-    'preference_set' => $method === 'proxy' ? 'fallback' : 'direct',
+    'preference_set' => ($method === 'proxy' || $method === 'fallback') ? 'fallback' : 'direct',
     'timestamp' => date('c')
 ]);
 ?>

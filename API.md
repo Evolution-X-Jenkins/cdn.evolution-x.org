@@ -118,7 +118,7 @@ Token must be set in environment variable `PUSH_API_TOKEN` or exported in `.env`
   },
   "r2": {
     "status": "healthy",
-    "message": "R2 configuration present",
+    "message": "Bunny configuration present",
     "configured": true
   },
   "php_extensions": {

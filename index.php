@@ -1,6 +1,6 @@
 <?php
 /**
- * PHP File Browser for R2 Directory
+ * PHP File Browser for Bunny Storage
  * Main router with clean URLs and modular structure
  */
 
@@ -265,10 +265,10 @@ if ($is_proxy_download) {
     }
 }
 
-// Handle direct download requests - immediate R2 stream-through
+// Handle direct download requests
 function DownloadRom($target_file, $proxy) {
     global $db;
-    require_once 'modules/setup/r2_download.php';
+    require_once 'modules/setup/download_backend.php';
 
     $routeName = $proxy ? 'proxy-download' : 'download';
     $rateLimitState = enforce_download_rate_limit($routeName, $target_file);
@@ -308,7 +308,7 @@ function DownloadRom($target_file, $proxy) {
             error_log('Failed to record download: ' . $e->getMessage());
         }
 
-        redirect_to_r2($target_file, $proxy); // false = regular stream / true = stream with fallback marker header
+        redirect_to_download_backend($target_file, $proxy);
         exit;
     } else {
         log_action('Direct download failed - file not found', $target_file);
