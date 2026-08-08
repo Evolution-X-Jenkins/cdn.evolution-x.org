@@ -85,6 +85,14 @@ function bunny_listing_warm_missing_directory_caches(CacheManager $cache, array 
     }
 }
 
+function bunny_listing_warm_missing_directory_caches_from_seed(CacheManager $cache, array $items, $allowRecursion) {
+    if (!$allowRecursion) {
+        return;
+    }
+
+    bunny_listing_warm_missing_directory_caches($cache, $items);
+}
+
 function bunny_listing_refresh_cache_in_background($relativePath, array $seedItems = []) {
     register_shutdown_function(function() use ($relativePath, $seedItems) {
         if (function_exists('fastcgi_finish_request')) {
@@ -98,13 +106,15 @@ function bunny_listing_refresh_cache_in_background($relativePath, array $seedIte
 
         try {
             $cache = CacheManager::getInstance();
-            $freshItems = bunny_list_directory_items($relativePath);
+            $freshResult = bunny_list_directory_items_with_source($relativePath);
+            $freshItems = $freshResult['items'];
             $cache->set(bunny_listing_cache_key($relativePath), ['items' => $freshItems], BUNNY_LISTING_CACHE_TTL);
 
+            $allowRecursion = ($freshResult['source'] ?? 'bunny') === 'bunny';
             if (!empty($freshItems)) {
-                bunny_listing_warm_missing_directory_caches($cache, $freshItems);
+                bunny_listing_warm_missing_directory_caches_from_seed($cache, $freshItems, $allowRecursion);
             } elseif (!empty($seedItems)) {
-                bunny_listing_warm_missing_directory_caches($cache, $seedItems);
+                bunny_listing_warm_missing_directory_caches_from_seed($cache, $seedItems, $allowRecursion);
             }
         } catch (Throwable $e) {
             error_log('Background Bunny refresh failed for ' . $relativePath . ': ' . $e->getMessage());
@@ -142,7 +152,8 @@ function handleBucketListingApi($method) {
     }
 
     try {
-        $items = bunny_list_directory_items($relativePath);
+        $result = bunny_list_directory_items_with_source($relativePath);
+        $items = $result['items'];
         $cache->set($cacheKey, ['items' => $items], BUNNY_LISTING_CACHE_TTL);
         bunny_listing_refresh_cache_in_background($relativePath, $items);
 

@@ -102,6 +102,11 @@ function bunny_relative_to_bucket_prefix($relativePath) {
 }
 
 function bunny_list_directory_items($relativePath) {
+	$result = bunny_list_directory_items_with_source($relativePath);
+	return $result['items'];
+}
+
+function bunny_list_directory_items_with_source($relativePath) {
 	$relativePath = bunny_normalize_relative_path($relativePath);
 	$prefix = bunny_relative_to_bucket_prefix($relativePath);
 
@@ -131,14 +136,20 @@ function bunny_list_directory_items($relativePath) {
 		}
 
 		bunny_sort_items($items);
-		return $items;
+		return [
+			'items' => $items,
+			'source' => 'bunny',
+		];
 	} catch (Throwable $e) {
 		error_log('Bunny SDK listing fallback activated for ' . $relativePath . ': ' . $e->getMessage());
 	}
 
 	$items = bunny_list_directory_items_raw($prefix, $relativePath);
 	bunny_sort_items($items);
-	return $items;
+	return [
+		'items' => $items,
+		'source' => 'fallback',
+	];
 }
 
 function bunny_should_hide_name($name) {
