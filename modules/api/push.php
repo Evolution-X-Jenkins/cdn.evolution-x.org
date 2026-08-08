@@ -909,13 +909,38 @@ function triggerPushSuccessDiscordWebhook($job, $runResult) {
     $codename = $job['codename'] ?? 'unknown';
     $version = $job['version'] ?? 'unknown';
     $releaseDate = $job['release_date'] ?? 'unknown';
-
-    $messageContent = "**CDN Push Release Success**\n";
-    $messageContent .= "Push completed successfully for {$codename} {$version} ({$releaseDate})";
+    $buildType = $job['build_type'] ?? 'unknown';
 
     $payload = [
         'username' => $config['username'],
-        'content' => $messageContent,
+        'content' => '',
+        'embeds' => [[
+            'title' => 'CDN Push Release - Success',
+            'description' => "Push completed successfully for:\n\nOTA merge can now be completed.",
+            'color' => 5763719,
+            'fields' => [
+                [
+                    'name' => 'Device',
+                    'value' => (string)$codename,
+                    'inline' => true,
+                ],
+                [
+                    'name' => 'Version',
+                    'value' => (string)$version,
+                    'inline' => true,
+                ],
+                [
+                    'name' => 'Build Date',
+                    'value' => (string)$releaseDate,
+                    'inline' => true,
+                ],
+                [
+                    'name' => 'Type',
+                    'value' => (string)$buildType,
+                    'inline' => true,
+                ],
+            ],
+        ]],
         'allowed_mentions' => [
             'parse' => ['users']
         ]
