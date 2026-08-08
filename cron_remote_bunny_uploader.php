@@ -77,7 +77,7 @@ date_default_timezone_set(getenv('TZ') ?: 'UTC');
 
 $config = [
     'watch_roots' => array_values(array_filter(array_map('trim', explode(',', (string)(getenv('REMOTE_UPLOAD_WATCH_ROOTS') ?: '/mnt/pre-release'))))),
-    'stable_seconds' => max(5, (int)(getenv('REMOTE_UPLOAD_STABLE_SECONDS') ?: 30)),
+    'stable_seconds' => max(1, (int)(getenv('REMOTE_UPLOAD_STABLE_SECONDS') ?: 30)),
     'state_file' => (string)(getenv('REMOTE_UPLOAD_STATE_FILE') ?: __DIR__ . '/data/cache/remote_bunny_uploader_state.json'),
     'lock_file' => (string)(getenv('REMOTE_UPLOAD_LOCK_FILE') ?: __DIR__ . '/data/cache/remote_bunny_uploader.lock'),
     'log_file' => (string)(getenv('REMOTE_UPLOAD_LOG_FILE') ?: __DIR__ . '/logs/remote_bunny_uploader_' . date('Y-m-d') . '.log'),
@@ -116,7 +116,7 @@ foreach (array_slice($argv, 1) as $arg) {
     }
 
     if (strpos($arg, '--stable-seconds=') === 0) {
-        $config['stable_seconds'] = max(5, (int)substr($arg, 17));
+        $config['stable_seconds'] = max(1, (int)substr($arg, 17));
         continue;
     }
 
@@ -254,6 +254,28 @@ function ru_discover_release_dirs(array $roots) {
                 continue;
             }
 
+            $hasDirectCandidate = false;
+            foreach ($secondLevel as $entry) {
+                if ($entry === '.' || $entry === '..' || strpos($entry, '.') === 0) {
+                    continue;
+                }
+
+                $entryPath = $codenamePath . '/' . $entry;
+                if (is_file($entryPath) && ru_is_candidate_file($entry)) {
+                    $hasDirectCandidate = true;
+                    break;
+                }
+            }
+
+            if ($hasDirectCandidate) {
+                $result[] = [
+                    'root' => $resolvedRoot,
+                    'codename' => $codename,
+                    'release' => '',
+                    'path' => $codenamePath,
+                ];
+            }
+
             foreach ($secondLevel as $release) {
                 if ($release === '.' || $release === '..' || strpos($release, '.') === 0) {
                     continue;
@@ -289,6 +311,7 @@ function ru_collect_release_snapshot($releasePath) {
 
     $files = [];
     $signatureSource = [];
+    $latestMtime = 0;
 
     $iterator = new RecursiveIteratorIterator(
         new RecursiveDirectoryIterator($resolved, RecursiveDirectoryIterator::SKIP_DOTS),
@@ -317,6 +340,10 @@ function ru_collect_release_snapshot($releasePath) {
             'mtime' => $mtime,
         ];
 
+        if ($mtime > $latestMtime) {
+            $latestMtime = $mtime;
+        }
+
         $signatureSource[] = $relativePath . ':' . $size . ':' . $mtime;
     }
 
@@ -333,6 +360,7 @@ function ru_collect_release_snapshot($releasePath) {
         'signature' => hash('sha256', implode('|', $signatureSource)),
         'file_count' => count($files),
         'total_size' => array_sum(array_column($files, 'size')),
+        'latest_mtime' => $latestMtime,
     ];
 }
 
@@ -672,7 +700,9 @@ try {
             $destinationPrefixParts[] = $config['bunny']['remote_base_prefix'];
         }
         $destinationPrefixParts[] = $releaseDir['codename'];
-        $destinationPrefixParts[] = $releaseDir['release'];
+        if ($releaseDir['release'] !== '') {
+            $destinationPrefixParts[] = $releaseDir['release'];
+        }
         $destinationPrefix = implode('/', $destinationPrefixParts);
 
         if (!is_array($existing)) {
@@ -686,7 +716,7 @@ try {
                 'last_error' => null,
                 'first_seen_at' => $now,
                 'last_seen_at' => $now,
-                'stable_since' => $now,
+                'stable_since' => (int)($snapshot['latest_mtime'] ?? $now),
                 'signature' => $snapshot['signature'],
                 'snapshot' => $snapshot,
             ];
@@ -703,7 +733,7 @@ try {
         if (($existing['signature'] ?? '') !== $snapshot['signature']) {
             $state['jobs'][$key]['signature'] = $snapshot['signature'];
             $state['jobs'][$key]['snapshot'] = $snapshot;
-            $state['jobs'][$key]['stable_since'] = $now;
+            $state['jobs'][$key]['stable_since'] = (int)($snapshot['latest_mtime'] ?? $now);
             $state['jobs'][$key]['status'] = 'queued';
             $state['jobs'][$key]['last_error'] = null;
             ru_log('Detected changes, re-queued: ' . $releaseDir['path']);
