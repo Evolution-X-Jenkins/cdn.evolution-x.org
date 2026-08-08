@@ -955,7 +955,7 @@ function triggerPushFailureDiscordWebhook($job, $runResult) {
 
     $messageContent = "**CDN Push Release Error**\n";
     $messageContent .= "Error occurred when pushing release for {$codename}\n\n";
-    $messageContent .= "{$errorMessage}\n\n";
+    $messageContent .= "Job: **{$jobId}**\n\n";
     $messageContent .= "<@180736511354863627> Please investigate ASAP";
 
     $payload = [
