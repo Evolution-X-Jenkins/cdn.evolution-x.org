@@ -740,34 +740,18 @@ function verifyBunnyUploadIntegrity($source, $destPath, $jobId = null, $codename
         $remotePath = $destPrefix === '' ? $relativePath : ($destPrefix . '/' . $relativePath);
 
         try {
-            $remoteInfo = $client->info($remotePath);
-        } catch (Throwable $e) {
-            try {
-                $rawInfo = bunny_describe_file_raw($remotePath);
-                $remoteSize = (int)($rawInfo['length'] ?? 0);
-                if ((int)$item->getSize() !== $remoteSize) {
-                    if ($jobId !== null) {
-                        logPushWorkerProgress($jobId, 'Size mismatch for ' . $relativePath . ' local=' . (int)$item->getSize() . ' remote=' . $remoteSize);
-                    }
-                    return false;
-                }
-
-                $verifiedFiles++;
-                if ($jobId !== null && $verifiedFiles % 50 === 0) {
-                    logPushWorkerProgress($jobId, 'verification progress: checked ' . $verifiedFiles . ' Bunny files');
-                }
-                continue;
-            } catch (Throwable $rawException) {
-                if ($jobId !== null) {
-                    logPushWorkerProgress($jobId, 'Verification failed for ' . $relativePath . ': ' . $e->getMessage() . ' | raw fallback failed: ' . $rawException->getMessage());
-                }
-                return false;
+            $rawInfo = bunny_describe_file_raw($remotePath);
+            $remoteSize = (int)($rawInfo['length'] ?? 0);
+        } catch (Throwable $rawException) {
+            if ($jobId !== null) {
+                logPushWorkerProgress($jobId, 'Verification failed for ' . $relativePath . ': ' . $rawException->getMessage());
             }
+            return false;
         }
 
-        if ((int)$item->getSize() !== (int)$remoteInfo->getSize()) {
+        if ((int)$item->getSize() !== $remoteSize) {
             if ($jobId !== null) {
-                logPushWorkerProgress($jobId, 'Size mismatch for ' . $relativePath . ' local=' . (int)$item->getSize() . ' remote=' . (int)$remoteInfo->getSize());
+                logPushWorkerProgress($jobId, 'Size mismatch for ' . $relativePath . ' local=' . (int)$item->getSize() . ' remote=' . $remoteSize);
             }
             return false;
         }
