@@ -110,45 +110,11 @@ function bunny_list_directory_items_with_source($relativePath) {
 	$relativePath = bunny_normalize_relative_path($relativePath);
 	$prefix = bunny_relative_to_bucket_prefix($relativePath);
 
-	try {
-		$client = bunny_get_storage_client();
-		$files = $client->listFiles($prefix);
-
-		$items = [];
-		foreach ($files as $file) {
-			$name = (string)$file->getName();
-			if (bunny_should_hide_name($name)) {
-				continue;
-			}
-
-			$isDir = (bool)$file->isDirectory();
-			$itemPath = $relativePath === '/' ? '/' . $name : $relativePath . '/' . $name;
-			$itemPath = bunny_normalize_relative_path($itemPath);
-
-			$items[] = [
-				'name' => $name,
-				'path' => $itemPath,
-				'is_dir' => $isDir,
-				'size' => $isDir ? 0 : (int)$file->getSize(),
-				'modified_at' => $file->getDateModified()->getTimestamp(),
-				'icon' => get_file_icon($name, $isDir),
-			];
-		}
-
-		bunny_sort_items($items);
-		return [
-			'items' => $items,
-			'source' => 'bunny',
-		];
-	} catch (Throwable $e) {
-		error_log('Bunny SDK listing fallback activated for ' . $relativePath . ': ' . $e->getMessage());
-	}
-
 	$items = bunny_list_directory_items_raw($prefix, $relativePath);
 	bunny_sort_items($items);
 	return [
 		'items' => $items,
-		'source' => 'fallback',
+		'source' => 'raw',
 	];
 }
 
