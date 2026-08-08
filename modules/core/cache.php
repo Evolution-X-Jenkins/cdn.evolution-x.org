@@ -56,7 +56,6 @@ class CacheManager {
             }
             
             $this->redis_available = true;
-            error_log('Redis cache initialized');
         } catch (Exception $e) {
             error_log('Redis initialization failed: ' . $e->getMessage());
             $this->redis_available = false;
