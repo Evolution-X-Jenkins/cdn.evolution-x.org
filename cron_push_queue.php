@@ -48,7 +48,7 @@ try {
     
     log_push_queue("Status: $status - $message");
     
-    if (isset($pushQueueResult['jobId'])) {
+    if (isset($pushQueueResult['jobId']) && !in_array($status, ['idle', 'worker_busy', 'already_processing'], true)) {
         $jobId = $pushQueueResult['jobId'];
         $jobSuccess = ($pushQueueResult['jobSuccess'] ?? false) ? 'SUCCESS' : 'FAILED';
         log_push_queue("Job #$jobId completed: $jobSuccess");

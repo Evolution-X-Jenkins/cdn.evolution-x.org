@@ -43,6 +43,45 @@ function bunny_get_storage_client() {
 	return $client;
 }
 
+function bunny_describe_file_raw($path) {
+	$zone = trim((string)BUNNY_STORAGE_ZONE);
+	$accessKey = trim((string)BUNNY_STORAGE_ACCESS_KEY);
+	$region = bunny_normalize_region(BUNNY_STORAGE_REGION);
+
+	if ($zone === '' || $accessKey === '') {
+		throw new RuntimeException('Bunny storage configuration is missing.');
+	}
+
+	$baseUrl = BunnyRegion::getBaseUrl($region);
+	$normalizedPath = ltrim(bunny_normalize_relative_path($path), '/');
+	$url = rtrim($baseUrl, '/') . '/' . $zone . '/' . $normalizedPath;
+
+	$context = stream_context_create([
+		'http' => [
+			'method' => 'DESCRIBE',
+			'header' => "AccessKey: {$accessKey}\r\n",
+			'timeout' => 25,
+		],
+	]);
+
+	$raw = @file_get_contents($url, false, $context);
+	if ($raw === false) {
+		throw new RuntimeException('Failed to fetch Bunny file metadata.');
+	}
+
+	$decoded = json_decode($raw, true);
+	if (!is_array($decoded)) {
+		throw new RuntimeException('Invalid Bunny file metadata response.');
+	}
+
+	return [
+		'length' => isset($decoded['Length']) ? (int)$decoded['Length'] : 0,
+		'checksum' => strtolower((string)($decoded['Checksum'] ?? '')),
+		'is_directory' => !empty($decoded['IsDirectory']),
+		'path' => (string)($decoded['ObjectName'] ?? '') . '/' . (string)($decoded['Path'] ?? ''),
+	];
+}
+
 function bunny_normalize_relative_path($path) {
 	$trimmed = trim((string)$path);
 	if ($trimmed === '' || $trimmed === '/') {
