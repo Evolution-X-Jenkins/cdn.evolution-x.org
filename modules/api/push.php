@@ -916,30 +916,8 @@ function triggerPushSuccessDiscordWebhook($job, $runResult) {
         'content' => '',
         'embeds' => [[
             'title' => 'CDN Push Release - Success',
-            'description' => "Push completed successfully for:\n\nOTA merge can now be completed.",
+            'description' => "Device: `{$codename}`\nVersion: `{$version}`\nBuild Date: `{$releaseDate}`\nType: `{$buildType}`\n\nOTA merge can now be completed.",
             'color' => 5763719,
-            'fields' => [
-                [
-                    'name' => 'Device',
-                    'value' => (string)$codename,
-                    'inline' => true,
-                ],
-                [
-                    'name' => 'Version',
-                    'value' => (string)$version,
-                    'inline' => true,
-                ],
-                [
-                    'name' => 'Build Date',
-                    'value' => (string)$releaseDate,
-                    'inline' => true,
-                ],
-                [
-                    'name' => 'Type',
-                    'value' => (string)$buildType,
-                    'inline' => true,
-                ],
-            ],
         ]],
         'allowed_mentions' => [
             'parse' => ['users']
@@ -976,16 +954,22 @@ function triggerPushFailureDiscordWebhook($job, $runResult) {
 
     $jobId = (int)($job['id'] ?? 0);
     $codename = $job['codename'] ?? 'unknown';
+    $version = $job['version'] ?? 'unknown';
+    $releaseDate = $job['release_date'] ?? 'unknown';
+    $buildType = $job['build_type'] ?? 'unknown';
     $errorMessage = trim((string)($runResult['error'] ?? $job['error_message'] ?? 'Unknown push failure'));
-
-    $messageContent = "**CDN Push Release Error**\n";
-    $messageContent .= "Error occurred when pushing release for {$codename}\n\n";
-    $messageContent .= "Job: **{$jobId}**\n\n";
-    $messageContent .= "<@180736511354863627> Please investigate ASAP";
 
     $payload = [
         'username' => $config['username'],
-        'content' => $messageContent,
+        'content' => '',
+        'embeds' => [[
+            'title' => 'CDN Push Release - Failed',
+            'description' => "Device: `{$codename}`\nVersion: `{$version}`\nBuild Date: `{$releaseDate}`\nType: `{$buildType}`\n\nError: `{$errorMessage}`",
+            'color' => 15548997,
+            'footer' => [
+                'text' => 'Job #' . $jobId,
+            ],
+        ]],
         'allowed_mentions' => [
             'parse' => ['users']
         ]
@@ -995,7 +979,29 @@ function triggerPushFailureDiscordWebhook($job, $runResult) {
         $payload['avatar_url'] = $config['avatarUrl'];
     }
 
-    $result = sendJsonWebhookRequest($config['url'], $payload);
+    $embedResult = sendJsonWebhookRequest($config['url'], $payload);
+
+    $mentionPayload = [
+        'username' => $config['username'],
+        'content' => '<@180736511354863627> Please investigate ASAP',
+        'allowed_mentions' => [
+            'parse' => ['users']
+        ]
+    ];
+
+    if ($config['avatarUrl'] !== '') {
+        $mentionPayload['avatar_url'] = $config['avatarUrl'];
+    }
+
+    $mentionResult = sendJsonWebhookRequest($config['url'], $mentionPayload);
+
+    $result = [
+        'sent' => ($embedResult['sent'] ?? false) && ($mentionResult['sent'] ?? false),
+        'httpCode' => $embedResult['httpCode'] ?? 0,
+        'error' => ($embedResult['error'] ?? null) ?: ($mentionResult['error'] ?? null),
+        'embed' => $embedResult,
+        'mention' => $mentionResult,
+    ];
     error_log('[push-worker] Discord failure webhook result for job #' . $jobId . ': ' . json_encode($result));
 
     return $result;
@@ -1094,7 +1100,7 @@ function getPushCompletionCallbackConfig() {
 
 function getPushSuccessDiscordWebhookConfig() {
     $url = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_URL') ?: ''));
-    $username = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_USERNAME') ?: 'Evolution X Push Worker'));
+    $username = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_USERNAME') ?: 'Evolution X CDN'));
     $avatarUrl = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_AVATAR_URL') ?: ''));
 
     return [
@@ -1107,7 +1113,7 @@ function getPushSuccessDiscordWebhookConfig() {
 
 function getPushFailureDiscordWebhookConfig() {
     $url = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_URL') ?: ''));
-    $username = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_USERNAME') ?: 'Evolution X Push Worker'));
+    $username = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_USERNAME') ?: 'Evolution X CDN'));
     $avatarUrl = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_AVATAR_URL') ?: ''));
 
     return [
