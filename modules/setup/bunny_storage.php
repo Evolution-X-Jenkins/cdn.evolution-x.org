@@ -85,60 +85,56 @@ function bunny_stream_download_file($objectKey, $downloadPath, $fallbackMode = f
 		header('X-Fallback-Mode: 1');
 	}
 
-	$command = [
-		'curl',
-		'--fail',
-		'--location',
-		'--silent',
-		'--show-error',
-		'--retry',
-		'2',
-		'--connect-timeout',
-		'30',
-		'--header',
-		'AccessKey: ' . $accessKey,
-		'--output',
-		'-',
-		$downloadUrl,
-	];
+	$context = stream_context_create([
+		'http' => [
+			'header' => "AccessKey: {$accessKey}\r\nConnection: close\r\n",
+			'ignore_errors' => true,
+			'timeout' => 60,
+		],
+	]);
 
-	$descriptors = [
-		0 => ['pipe', 'r'],
-		1 => ['pipe', 'w'],
-		2 => ['pipe', 'w'],
-	];
-
-	$process = @proc_open($command, $descriptors, $pipes);
-	if (!is_resource($process)) {
-		throw new RuntimeException('Unable to start curl download process.');
+	$stream = @fopen($downloadUrl, 'rb', false, $context);
+	if ($stream === false) {
+		throw new RuntimeException('Unable to stream Bunny download via PHP stream wrapper.');
 	}
 
-	fclose($pipes[0]);
-	stream_set_blocking($pipes[1], true);
-	stream_set_blocking($pipes[2], true);
+	if (function_exists('stream_copy_to_stream')) {
+		$output = fopen('php://output', 'wb');
+		if ($output !== false) {
+			stream_copy_to_stream($stream, $output);
+			fclose($output);
+		} else {
+			while (!feof($stream)) {
+				$chunk = fread($stream, 1024 * 1024);
+				if ($chunk === false) {
+					break;
+				}
 
-	while (!feof($pipes[1])) {
-		$chunk = fread($pipes[1], 1024 * 1024);
-		if ($chunk === false) {
-			break;
+				echo $chunk;
+				flush();
+
+				if (connection_aborted()) {
+					break;
+				}
+			}
 		}
+	} else {
+		while (!feof($stream)) {
+			$chunk = fread($stream, 1024 * 1024);
+			if ($chunk === false) {
+				break;
+			}
 
-		echo $chunk;
-		flush();
+			echo $chunk;
+			flush();
 
-		if (connection_aborted()) {
-			break;
+			if (connection_aborted()) {
+				break;
+			}
 		}
 	}
 
-	$stderr = stream_get_contents($pipes[2]);
-	fclose($pipes[1]);
-	fclose($pipes[2]);
-
-	$exitCode = proc_close($process);
-	if ($exitCode !== 0) {
-		throw new RuntimeException('curl download failed: ' . trim($stderr));
-	}
+	fclose($stream);
 }
 
 function bunny_describe_file_raw($path) {
