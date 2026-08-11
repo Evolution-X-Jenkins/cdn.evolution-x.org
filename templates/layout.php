@@ -43,31 +43,19 @@
         // Simple downloadDetector implementation
         window.downloadDetector = {
             async getBestDownloadMethod() {
-                // Check user preference first
-                const preference = this.getCookie('download_method_preference');
-                if (preference === 'fallback') {
-                    return {
-                        recommended_method: 'proxy',
-                        direct_available: false,
-                        reason: 'user_preference'
-                    };
-                }
-                
                 return {
                     recommended_method: 'direct',
                     direct_available: true,
-                    reason: 'server_side_download'
+                    reason: 'signed_url_only'
                 };
             },
             
             reportDirectSuccess() {
-                // Remove fallback preference on success
-                this.setCookie('download_method_preference', '', -1);
+                // No-op: signed URLs are the only supported download path.
             },
             
             reportDirectFailure() {
-                // Set fallback preference for future downloads
-                this.setCookie('download_method_preference', 'fallback', 24 * 60 * 60);
+                // No-op: fallback/proxy mode is disabled.
             },
             
             getCookie(name) {

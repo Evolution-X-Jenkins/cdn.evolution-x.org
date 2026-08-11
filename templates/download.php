@@ -66,82 +66,18 @@ async function countdown() {
 
 async function startDownload() {
   try {
-    const directDownloadUrl = <?php echo json_encode($directDownloadUrl ?: '/' . ltrim((string)$file_path, '/') . '/download'); ?>;
+    const directDownloadUrl = <?php echo json_encode($directDownloadUrl ?: '/'); ?>;
 
-    if (window.downloadDetector) {
-      try {
-        const results = await window.downloadDetector.getBestDownloadMethod();
-
-        if (results.recommended_method === 'proxy') {
-          console.log('Using proxy download (user preference)');
-          document.getElementById('proxy-notice').style.display = 'block';
-          useProxy = true;
-          window.location.href = '/<?php echo addslashes($file_path); ?>/proxy-download';
-          return;
-        }
-      } catch (error) {
-        console.log('Download method detection failed:', error);
-      }
+    if (!directDownloadUrl || directDownloadUrl === '/') {
+      console.error('No signed download URL available.');
+      return;
     }
 
-    console.log('Attempting direct Bunny download...');
-    const downloadUrl = directDownloadUrl;
-
-    const link = document.createElement('a');
-    link.href = downloadUrl;
-    link.download = '';
-    link.style.display = 'none';
-    
-    // Set a timeout to detect if download doesn't start
-    const failureTimeout = setTimeout(() => {
-      console.log('Direct download timeout - assuming failure');
-      if (window.downloadDetector) {
-        window.downloadDetector.reportDirectFailure();
-      }
-      fallbackToProxy();
-    }, 15000); // 15 second timeout
-    
-    document.body.appendChild(link);
-    link.click();
-    
-    // Success handling
-    setTimeout(() => {
-      clearTimeout(failureTimeout);
-      checkDownloadStarted();
-      
-      // Report success for direct downloads
-      if (window.downloadDetector) {
-        setTimeout(() => {
-          window.downloadDetector.reportDirectSuccess();
-        }, 3000);
-      }
-    }, 2000);
-
-    setTimeout(() => {
-      if (link.parentNode) {
-        link.parentNode.removeChild(link);
-      }
-    }, 5000);
-    
-    console.log('Download started with direct method');
-    
+    console.log('Using signed S3/Bunny direct download URL...');
+    window.location.href = directDownloadUrl;
   } catch (error) {
     console.error('Error in startDownload:', error);
-    fallbackToProxy();
   }
-}
-
-function fallbackToProxy() {
-  if (useProxy) {
-    console.log('Already using proxy, no further fallback available');
-    return;
-  }
-  
-  console.log('Falling back to proxy download...');
-  document.getElementById('proxy-notice').style.display = 'block';
-  
-  // Use direct navigation for proxy fallback to ensure it works
-  window.location = '/<?php echo addslashes($file_path); ?>/proxy-download';
 }
 
 

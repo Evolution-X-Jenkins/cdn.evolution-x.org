@@ -270,7 +270,7 @@ function DownloadRom($target_file, $proxy) {
     global $db;
     require_once 'modules/setup/download_backend.php';
 
-    $routeName = $proxy ? 'proxy-download' : 'download';
+    $routeName = 'download';
     $rateLimitState = enforce_download_rate_limit($routeName, $target_file);
     if (!empty($rateLimitState['blocked'])) {
         render_rate_limit_429_page($rateLimitState, $routeName);
@@ -293,9 +293,8 @@ function DownloadRom($target_file, $proxy) {
     }
 
     if (is_file($file_path) || (is_array($manifestFileMeta) && empty($manifestFileMeta['is_dir'])) || $isBunnyFile) {
-        log_action('Direct download requested', $target_file);
+        log_action('Signed download requested', $target_file);
 
-        // Record download statistics for direct/proxy delivery paths.
         $userId = get_user_id();
         $ipAddress = $_SERVER['REMOTE_ADDR'] ?? '';
         $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
@@ -308,11 +307,11 @@ function DownloadRom($target_file, $proxy) {
             error_log('Failed to record download: ' . $e->getMessage());
         }
 
-        redirect_to_download_backend($target_file, $proxy);
+        redirect_to_download_backend($target_file, false);
         exit;
     } else {
-        log_action('Direct download failed - file not found', $target_file);
-	return false;
+        log_action('Signed download failed - file not found', $target_file);
+        return false;
     }
 }
 

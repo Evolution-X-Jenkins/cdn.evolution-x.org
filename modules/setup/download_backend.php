@@ -10,18 +10,18 @@ require_once __DIR__ . '/bunny_storage.php';
 function redirect_to_download_backend($file_path, $use_fallback = false) {
     log_action('Download initiated', $file_path);
 
-    try {
-        bunny_stream_download_file(ltrim($file_path, '/'), $file_path, $use_fallback);
-        log_action('Download stream completed', $file_path);
-        exit;
-    } catch (\Throwable $e) {
-        error_log("Failed to stream Bunny download for {$file_path}: " . $e->getMessage());
-        log_action('Download failed - stream error', $file_path);
+    $downloadUrl = generate_download_url($file_path, DOWNLOAD_URL_EXPIRY, false);
+    if (empty($downloadUrl)) {
+        error_log("No presigned S3/Bunny URL available for {$file_path}");
+        log_action('Download failed - no presigned URL', $file_path);
         http_response_code(500);
         header('Content-Type: application/json');
-        echo json_encode(['error' => 'Failed to stream file']);
+        echo json_encode(['error' => 'No presigned download URL available']);
         exit;
     }
+
+    header('Location: ' . $downloadUrl, true, 302);
+    exit;
 }
 
 // Handle direct access to this file
