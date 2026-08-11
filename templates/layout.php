@@ -40,26 +40,8 @@
     }
     ?>
     <script>
-        window.BUNNY_DOWNLOAD_DOMAINS = <?php echo json_encode(array_values(array_unique($bunnyDownloadDomains))); ?>;
-
         // Simple downloadDetector implementation
         window.downloadDetector = {
-            async testDomain(domain, timeout = 5000) {
-                return new Promise(resolve => {
-                    const img = new Image();
-                    const timer = setTimeout(() => {
-                        resolve(false);
-                    }, timeout);
-                    
-                    img.onload = img.onerror = () => {
-                        clearTimeout(timer);
-                        resolve(true);
-                    };
-                    
-                    img.src = `https://${domain}/favicon.ico?t=${Date.now()}`;
-                });
-            },
-            
             async getBestDownloadMethod() {
                 // Check user preference first
                 const preference = this.getCookie('download_method_preference');
@@ -71,22 +53,10 @@
                     };
                 }
                 
-                // Test configured Bunny/public domains.
-                const configuredDomains = Array.isArray(window.BUNNY_DOWNLOAD_DOMAINS) ? window.BUNNY_DOWNLOAD_DOMAINS : [];
-                const domains = configuredDomains.length > 0 ? configuredDomains : [window.location.hostname];
-                
-                let directAvailable = false;
-                for (const domain of domains) {
-                    if (await this.testDomain(domain, 3000)) {
-                        directAvailable = true;
-                        break;
-                    }
-                }
-                
                 return {
-                    recommended_method: directAvailable ? 'direct' : 'proxy',
-                    direct_available: directAvailable,
-                    reason: directAvailable ? 'connectivity_ok' : 'connectivity_restricted'
+                    recommended_method: 'direct',
+                    direct_available: true,
+                    reason: 'server_side_download'
                 };
             },
             

@@ -65,7 +65,7 @@ async function countdown() {
 
 async function startDownload() {
   try {
-    // Check connectivity and get best download method
+    // Check user preference and keep the browser on the server-side download path.
     if (window.downloadDetector) {
       try {
         const results = await window.downloadDetector.getBestDownloadMethod();
@@ -84,23 +84,15 @@ async function startDownload() {
       }
     }
     
-    // Try direct Bunny download
+    // Start the server-side SDK download.
     console.log('Attempting direct download...');
     const downloadUrl = '/<?php echo addslashes($file_path); ?>/download';
     
-    // Create hidden iframe for download
-    const iframe = document.createElement('iframe');
-    iframe.style.display = 'none';
-    iframe.src = downloadUrl;
-    
-    // Handle iframe errors (indicates download failure)
-    iframe.onerror = () => {
-      console.log('Direct download failed via iframe error');
-      if (window.downloadDetector) {
-        window.downloadDetector.reportDirectFailure();
-      }
-      fallbackToProxy();
-    };
+    // Trigger the download with a real anchor click.
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = '';
+    link.style.display = 'none';
     
     // Set a timeout to detect if download doesn't start
     const failureTimeout = setTimeout(() => {
@@ -111,7 +103,8 @@ async function startDownload() {
       fallbackToProxy();
     }, 15000); // 15 second timeout
     
-    document.body.appendChild(iframe);
+    document.body.appendChild(link);
+    link.click();
     
     // Success handling
     setTimeout(() => {
@@ -125,6 +118,12 @@ async function startDownload() {
         }, 3000);
       }
     }, 2000);
+
+    setTimeout(() => {
+      if (link.parentNode) {
+        link.parentNode.removeChild(link);
+      }
+    }, 5000);
     
     console.log('Download started with direct method');
     

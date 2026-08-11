@@ -43,6 +43,104 @@ function bunny_get_storage_client() {
 	return $client;
 }
 
+function bunny_sanitize_download_filename($path) {
+	$fileName = basename((string)$path);
+	$safeFileName = str_replace(["\r", "\n", '"'], '', $fileName);
+
+	if ($safeFileName === '') {
+		return 'download.bin';
+	}
+
+	return $safeFileName;
+}
+
+function bunny_stream_download_file($objectKey, $downloadPath, $fallbackMode = false) {
+	$objectKey = ltrim((string)$objectKey, '/');
+	if ($objectKey === '') {
+		throw new RuntimeException('Missing Bunny object key.');
+	}
+
+	$zone = trim((string)BUNNY_STORAGE_ZONE);
+	$accessKey = trim((string)BUNNY_STORAGE_ACCESS_KEY);
+	$region = bunny_normalize_region(BUNNY_STORAGE_REGION);
+	$baseUrl = BunnyRegion::getBaseUrl($region);
+	$downloadUrl = rtrim($baseUrl, '/') . '/' . rawurlencode($zone) . '/' . implode('/', array_map('rawurlencode', explode('/', $objectKey)));
+
+	if (function_exists('set_time_limit')) {
+		@set_time_limit(0);
+	}
+	@ini_set('zlib.output_compression', 'Off');
+
+	while (ob_get_level() > 0) {
+		ob_end_clean();
+	}
+
+	header('Content-Type: application/octet-stream');
+	header('Content-Disposition: attachment; filename="' . bunny_sanitize_download_filename($downloadPath !== '' ? $downloadPath : $objectKey) . '"');
+	header('Cache-Control: no-cache, no-store, must-revalidate');
+	header('Pragma: no-cache');
+	header('Expires: 0');
+	header('X-Accel-Buffering: no');
+	if ($fallbackMode) {
+		header('X-Fallback-Mode: 1');
+	}
+
+	$command = [
+		'curl',
+		'--fail',
+		'--location',
+		'--silent',
+		'--show-error',
+		'--retry',
+		'2',
+		'--connect-timeout',
+		'30',
+		'--header',
+		'AccessKey: ' . $accessKey,
+		'--output',
+		'-',
+		$downloadUrl,
+	];
+
+	$descriptors = [
+		0 => ['pipe', 'r'],
+		1 => ['pipe', 'w'],
+		2 => ['pipe', 'w'],
+	];
+
+	$process = @proc_open($command, $descriptors, $pipes);
+	if (!is_resource($process)) {
+		throw new RuntimeException('Unable to start curl download process.');
+	}
+
+	fclose($pipes[0]);
+	stream_set_blocking($pipes[1], true);
+	stream_set_blocking($pipes[2], true);
+
+	while (!feof($pipes[1])) {
+		$chunk = fread($pipes[1], 1024 * 1024);
+		if ($chunk === false) {
+			break;
+		}
+
+		echo $chunk;
+		flush();
+
+		if (connection_aborted()) {
+			break;
+		}
+	}
+
+	$stderr = stream_get_contents($pipes[2]);
+	fclose($pipes[1]);
+	fclose($pipes[2]);
+
+	$exitCode = proc_close($process);
+	if ($exitCode !== 0) {
+		throw new RuntimeException('curl download failed: ' . trim($stderr));
+	}
+}
+
 function bunny_describe_file_raw($path) {
 	$zone = trim((string)BUNNY_STORAGE_ZONE);
 	$accessKey = trim((string)BUNNY_STORAGE_ACCESS_KEY);
