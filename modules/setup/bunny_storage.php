@@ -98,25 +98,10 @@ function bunny_stream_download_file($objectKey, $downloadPath, $fallbackMode = f
 		throw new RuntimeException('Unable to stream Bunny download via PHP stream wrapper.');
 	}
 
-	if (function_exists('stream_copy_to_stream')) {
-		$output = fopen('php://output', 'wb');
-		if ($output !== false) {
-			stream_copy_to_stream($stream, $output);
-			fclose($output);
-		} else {
-			while (!feof($stream)) {
-				$chunk = fread($stream, 1024 * 1024);
-				if ($chunk === false) {
-					break;
-				}
-
-				echo $chunk;
-				flush();
-
-				if (connection_aborted()) {
-					break;
-				}
-			}
+	if (function_exists('fpassthru')) {
+		$bytesWritten = @fpassthru($stream);
+		if ($bytesWritten === false) {
+			throw new RuntimeException('Failed to send Bunny download payload.');
 		}
 	} else {
 		while (!feof($stream)) {
