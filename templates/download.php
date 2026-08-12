@@ -1,5 +1,6 @@
 <?php
 ob_start();
+$directDownloadUrl = generate_download_url($file_path, 3600, false);
 ?>
 
 <div class="max-w-lg mx-auto bg-[#0f172a] border-2 border-[#0060ff] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg shadow-md p-8 mt-8 text-center" id="download-box">
@@ -65,17 +66,16 @@ async function countdown() {
 
 async function startDownload() {
   try {
-    // Check user preference and keep the browser on the server-side download path.
+    const directDownloadUrl = <?php echo json_encode($directDownloadUrl ?: '/' . ltrim((string)$file_path, '/') . '/download'); ?>;
+
     if (window.downloadDetector) {
       try {
         const results = await window.downloadDetector.getBestDownloadMethod();
-        
+
         if (results.recommended_method === 'proxy') {
-          // User prefers proxy - use it directly
           console.log('Using proxy download (user preference)');
           document.getElementById('proxy-notice').style.display = 'block';
           useProxy = true;
-          // For PHP implementation, we'll redirect to the fallback endpoint
           window.location.href = '/<?php echo addslashes($file_path); ?>/proxy-download';
           return;
         }
@@ -83,12 +83,10 @@ async function startDownload() {
         console.log('Download method detection failed:', error);
       }
     }
-    
-    // Start the server-side SDK download.
-    console.log('Attempting direct download...');
-    const downloadUrl = '/<?php echo addslashes($file_path); ?>/download';
-    
-    // Trigger the download with a real anchor click.
+
+    console.log('Attempting direct Bunny download...');
+    const downloadUrl = directDownloadUrl;
+
     const link = document.createElement('a');
     link.href = downloadUrl;
     link.download = '';
