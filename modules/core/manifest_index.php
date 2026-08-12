@@ -439,12 +439,26 @@ function listing_store_tree_in_db($pdo, $tree, $generatedAt) {
     $rows = [];
     listing_flatten_tree_for_db($tree, $generatedAt, $rows);
 
+    $dedupedRows = [];
+    foreach ($rows as $row) {
+        $path = listing_normalize_relative_path((string)($row['path'] ?? '/'));
+        if ($path === '' || $path === '/') {
+            continue;
+        }
+
+        if (isset($dedupedRows[$path])) {
+            continue;
+        }
+
+        $dedupedRows[$path] = $row;
+    }
+
     $pdo->beginTransaction();
     try {
         $pdo->exec('DELETE FROM listing_manifest_entries');
 
         $stmt = $pdo->prepare('INSERT INTO listing_manifest_entries (path, parent_path, name, is_dir, size, modified_at, first_seen_at, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-        foreach ($rows as $row) {
+        foreach ($dedupedRows as $row) {
             $stmt->execute([
                 $row['path'],
                 $row['parent_path'],
