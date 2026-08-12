@@ -24,6 +24,8 @@ $directDownloadUrl = generate_download_url($file_path, 3600, false);
   <a href="<?php echo htmlspecialchars($parent_dir); ?>" class="inline-flex h-10 w-full items-center justify-center rounded-full bg-[#0060ff] text-lg text-white transition-all duration-300 hover:bg-[#004bb5] my-4">Return now</a>
 </div>
 
+<iframe id="download-frame" style="display:none; width:0; height:0; border:0;" aria-hidden="true"></iframe>
+
 <div class="max-w-lg mx-auto bg-[#0f172a] border-2 border-[#0060ff] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg shadow-md p-8 mt-8 text-center">
   <p class="mb-4 text-white">While you wait, why not take the time to join our socials!</p>
   <div class="my-5 flex h-12 justify-evenly gap-4">
@@ -53,18 +55,33 @@ $directDownloadUrl = generate_download_url($file_path, 3600, false);
 
 <script>
 let delay = 5;
+let redirectDelay = 5;
 let downloadStarted = false;
-let useProxy = false;
 
-async function countdown() {
-  document.getElementById('counter').textContent = delay;
-  if(--delay === 0) {
-    await startDownload();
+const counterEl = document.getElementById('counter');
+const downloadBox = document.getElementById('download-box');
+const redirectBox = document.getElementById('redirect-box');
+const redirectCounterEl = document.getElementById('redirect-counter');
+const downloadFrame = document.getElementById('download-frame');
+
+function countdown() {
+  if (delay <= 0) {
+    startDownload();
+    return;
   }
-  else setTimeout(countdown, 1000);
+
+  counterEl.textContent = String(delay);
+  delay -= 1;
+  setTimeout(countdown, 1000);
 }
 
-async function startDownload() {
+function startDownload() {
+  if (downloadStarted) {
+    return;
+  }
+
+  downloadStarted = true;
+
   try {
     const directDownloadUrl = <?php echo json_encode($directDownloadUrl ?: '/'); ?>;
 
@@ -73,72 +90,30 @@ async function startDownload() {
       return;
     }
 
-    console.log('Using signed S3/Bunny direct download URL...');
-    window.location.href = directDownloadUrl;
+    downloadFrame.src = directDownloadUrl;
+    showRedirectMessage();
   } catch (error) {
-    console.error('Error in startDownload:', error);
+    console.error('Error starting download:', error);
   }
-}
-
-
-
-
-
-function checkDownloadStarted() {
-  // For modern browsers, we can use the Page Visibility API to detect if download started
-  const startTime = Date.now();
-  const checkInterval = setInterval(() => {
-    const elapsed = Date.now() - startTime;
-    
-    // If we've waited 5 seconds and the page is still visible/active, 
-    // assume download started successfully
-    if (elapsed > 5000) {
-      downloadStarted = true;
-      clearInterval(checkInterval);
-      showRedirectMessage();
-    }
-    
-    // Also check if page visibility changed (might indicate download dialog)
-    if (document.hidden || !document.hasFocus()) {
-      downloadStarted = true;
-      clearInterval(checkInterval);
-      showRedirectMessage();
-    }
-  }, 1000);
-  
-  // Fallback: assume download started after 3 seconds
-  setTimeout(() => {
-    if (!downloadStarted) {
-      downloadStarted = true;
-      clearInterval(checkInterval);
-      showRedirectMessage();
-    }
-  }, 3000);
 }
 
 function showRedirectMessage() {
-  document.getElementById('download-box').style.display = 'none';
-  document.getElementById('redirect-box').style.display = '';
+  downloadBox.style.display = 'none';
+  redirectBox.style.display = '';
+  redirectCounterEl.textContent = String(redirectDelay);
   redirectCountdown();
 }
 
-let redirectDelay = 5;
 function redirectCountdown() {
-  document.getElementById('redirect-counter').textContent = redirectDelay;
-  if(--redirectDelay === 0) {
-    window.location = '<?php echo htmlspecialchars($parent_dir); ?>';
-  } else {
-    setTimeout(redirectCountdown, 1000);
+  if (redirectDelay <= 0) {
+    window.location.href = '<?php echo htmlspecialchars($parent_dir); ?>';
+    return;
   }
-}
 
-// Add visibility change listener to detect download dialog
-document.addEventListener('visibilitychange', function() {
-  if (document.hidden && !downloadStarted) {
-    downloadStarted = true;
-    setTimeout(showRedirectMessage, 1000);
-  }
-});
+  redirectCounterEl.textContent = String(redirectDelay);
+  redirectDelay -= 1;
+  setTimeout(redirectCountdown, 1000);
+}
 
 countdown();
 </script>
