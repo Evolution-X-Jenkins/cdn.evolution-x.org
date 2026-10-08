@@ -22,8 +22,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?php echo isset($page_title) ? htmlspecialchars($page_title) : 'Evolution X - Download Server'; ?></title>
-    <link rel="stylesheet" href="static/tailwind.min.css">
-    <script defer src="static/alpine.min.js"></script>
+    <link rel="stylesheet" href="/static/tailwind.min.css">
+    <script defer src="/static/alpine.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -71,8 +71,8 @@
             }
         };
     </script>
-    <link rel="stylesheet" href="static/custom.css">
-    <link rel="icon" href="static/favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="/static/custom.css">
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
 </head>
 <body class="bg-[#040214] text-white font-prodsans tracking-wide h-screen">
     <nav class="bg-transparent shadow mb-6">
