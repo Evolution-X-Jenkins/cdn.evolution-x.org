@@ -5,6 +5,7 @@
  * Scans files under BASE_PATH and updates download_stat hashes when:
  * - md5 or sha256 is missing
  * - file_size in database differs from actual file size
+ * - a ZIP file's timestamp in its GitHub OTA release entry has changed
  *
  * Usage:
  *   php cron_hashes.php [--dry-run] [--limit=1000] [--path=subdir]
@@ -16,6 +17,7 @@ if (isset($_SERVER['HTTP_HOST'])) {
 
 require_once __DIR__ . '/modules/setup/config.php';
 require_once __DIR__ . '/modules/setup/database.php';
+require_once __DIR__ . '/modules/core/ota_hashes.php';
 
 function cron_env_bool($name, $default = false) {
     if (function_exists('env_bool')) {
@@ -193,6 +195,8 @@ function ensure_download_stat_table($pdo) {
                 `sha256` VARCHAR(64),
                 `md5` VARCHAR(32),
                 `file_size` BIGINT,
+                `hash_source_modified_at` BIGINT NULL,
+                `ota_json_timestamp` BIGINT NULL,
                 `last_updated` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         ';
@@ -204,6 +208,8 @@ function ensure_download_stat_table($pdo) {
                 sha256 TEXT,
                 md5 TEXT,
                 file_size INTEGER,
+                hash_source_modified_at INTEGER,
+                ota_json_timestamp INTEGER,
                 last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ';
@@ -270,26 +276,28 @@ try {
     $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
 
     $selectStmt = $pdo->prepare(
-        'SELECT count, md5, sha256, file_size FROM download_stat WHERE ' . $keyColumn . ' = ? LIMIT 1'
+        'SELECT count, md5, sha256, file_size, ota_json_timestamp FROM download_stat WHERE ' . $keyColumn . ' = ? LIMIT 1'
     );
 
     if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
         $upsertSql = '
-            INSERT INTO download_stat (`key`, count, md5, sha256, file_size)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO download_stat (`key`, count, md5, sha256, file_size, ota_json_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
                 md5 = VALUES(md5),
                 sha256 = VALUES(sha256),
-                file_size = VALUES(file_size)
+                file_size = VALUES(file_size),
+                ota_json_timestamp = COALESCE(VALUES(ota_json_timestamp), ota_json_timestamp)
         ';
     } else {
         $upsertSql = '
-            INSERT INTO download_stat (key_path, count, md5, sha256, file_size)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO download_stat (key_path, count, md5, sha256, file_size, ota_json_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(key_path) DO UPDATE SET
                 md5 = excluded.md5,
                 sha256 = excluded.sha256,
-                file_size = excluded.file_size
+                file_size = excluded.file_size,
+                ota_json_timestamp = COALESCE(excluded.ota_json_timestamp, download_stat.ota_json_timestamp)
         ';
     }
 
@@ -300,6 +308,8 @@ try {
         'hashed' => 0,
         'missingHashes' => 0,
         'sizeChanged' => 0,
+        'otaTimestampChanged' => 0,
+        'otaHashes' => 0,
         'skipped' => 0,
         'errors' => 0,
     ];
@@ -351,17 +361,40 @@ try {
 
         $missingHashes = false;
         $sizeChanged = false;
+        $timestampChanged = false;
         $storedCount = 0;
         $storedSize = null;
+        $storedOtaTimestamp = null;
+        $fileExtension = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+        $isImgFile = $fileExtension === 'img';
+        $isZipFile = $fileExtension === 'zip';
+        $otaRelease = null;
+        $otaTimestamp = null;
+
+        if ($isZipFile) {
+            $normalizedRelativePath = str_replace('\\', '/', $relativePath);
+            $pathParts = explode('/', $normalizedRelativePath);
+            $deviceName = $pathParts[0] ?? '';
+            $otaRelease = findOtaReleaseForFile($deviceName, basename($normalizedRelativePath));
+            if ($otaRelease !== null && isset($otaRelease['timestamp'])) {
+                $otaTimestamp = (int)$otaRelease['timestamp'];
+            }
+        }
 
         if ($row) {
             $storedCount = (int)($row['count'] ?? 0);
             $missingHashes = empty($row['md5']) || empty($row['sha256']);
             $storedSize = $row['file_size'];
             $sizeChanged = ($storedSize === null || (int)$storedSize !== (int)$actualSize);
+            $storedOtaTimestamp = isset($row['ota_json_timestamp'])
+                ? (int)$row['ota_json_timestamp']
+                : null;
+            $timestampChanged = $otaTimestamp !== null
+                && $storedOtaTimestamp !== $otaTimestamp;
         } else {
             $missingHashes = true;
             $sizeChanged = true;
+            $timestampChanged = $otaTimestamp !== null;
             $storedCount = 0;
         }
 
@@ -371,11 +404,13 @@ try {
             ' | db_record=' . ($row ? 'yes' : 'no') .
             ' | missing_hashes=' . ($missingHashes ? 'yes' : 'no') .
             ' | size_changed=' . ($sizeChanged ? 'yes' : 'no') .
-            ' | db_size=' . ($storedSize === null ? 'null' : (string)$storedSize)
+            ' | ota_timestamp_changed=' . ($timestampChanged ? 'yes' : 'no') .
+            ' | db_size=' . ($storedSize === null ? 'null' : (string)$storedSize) .
+            ' | db_ota_timestamp=' . ($storedOtaTimestamp === null ? 'null' : (string)$storedOtaTimestamp) .
+            ' | ota_timestamp=' . ($otaTimestamp === null ? 'null' : (string)$otaTimestamp)
         );
 
-        $isImgFile = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION)) === 'img';
-        if (!$missingHashes && !$sizeChanged && !$isImgFile) {
+        if (!$missingHashes && !$sizeChanged && !$timestampChanged && !$isImgFile) {
             $stats['skipped']++;
             hash_log('File: ' . $relativePath . ' | stage=skip | reason=already_fresh');
             continue;
@@ -387,6 +422,9 @@ try {
         if ($sizeChanged) {
             $stats['sizeChanged']++;
         }
+        if ($timestampChanged) {
+            $stats['otaTimestampChanged']++;
+        }
 
         if ($options['dryRun']) {
             $stats['hashed']++;
@@ -394,9 +432,24 @@ try {
             continue;
         }
 
-        hash_log('File: ' . $relativePath . ' | stage=hashing');
-        $md5 = @hash_file('md5', $fullPath);
-        $sha256 = @hash_file('sha256', $fullPath);
+        $useOtaHashes = $isZipFile
+            && $otaRelease !== null
+            && !empty($otaRelease['md5'])
+            && !empty($otaRelease['sha256']);
+
+        if ($useOtaHashes) {
+            hash_log(
+                'File: ' . $relativePath .
+                ' | stage=hashing | source=ota | branch=' . ($otaRelease['branch'] ?? 'unknown')
+            );
+            $md5 = $otaRelease['md5'];
+            $sha256 = $otaRelease['sha256'];
+            $stats['otaHashes']++;
+        } else {
+            hash_log('File: ' . $relativePath . ' | stage=hashing | source=file');
+            $md5 = @hash_file('md5', $fullPath);
+            $sha256 = @hash_file('sha256', $fullPath);
+        }
 
         if ($md5 === false || $sha256 === false) {
             $stats['errors']++;
@@ -405,9 +458,16 @@ try {
         }
 
         hash_log('File: ' . $relativePath . ' | stage=upsert');
-        $upsertStmt->execute([$relativePath, $storedCount, $md5, $sha256, $actualSize]);
+        $upsertStmt->execute([
+            $relativePath,
+            $storedCount,
+            $md5,
+            $sha256,
+            $actualSize,
+            $otaTimestamp
+        ]);
         $hashCache->delete('hash:' . $relativePath);
-        $stats['hashed']++;;
+        $stats['hashed']++;
         hash_log('File: ' . $relativePath . ' | stage=done | action=updated');
 
         if ($stats['scanned'] % 50 === 0) {
@@ -428,6 +488,8 @@ try {
     hash_log('Updated hashes: ' . $stats['hashed']);
     hash_log('Missing hashes matched: ' . $stats['missingHashes']);
     hash_log('File size changes matched: ' . $stats['sizeChanged']);
+    hash_log('ZIP OTA timestamp changes matched: ' . $stats['otaTimestampChanged']);
+    hash_log('ZIP hashes sourced from OTA: ' . $stats['otaHashes']);
     hash_log('Skipped (already fresh): ' . $stats['skipped']);
     hash_log('Errors: ' . $stats['errors']);
     hash_log('Duration: ' . number_format($duration, 2) . 's');

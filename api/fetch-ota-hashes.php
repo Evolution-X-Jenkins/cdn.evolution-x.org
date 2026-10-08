@@ -10,6 +10,7 @@ require_once __DIR__ . '/../modules/setup/config.php';
 require_once __DIR__ . '/../modules/setup/database.php';
 require_once __DIR__ . '/../modules/setup/bunny_storage.php';
 require_once __DIR__ . '/../modules/core/manifest_index.php';
+require_once __DIR__ . '/../modules/core/ota_hashes.php';
 
 function handleFetchOTAHashes() {
     header('Content-Type: application/json');
@@ -50,9 +51,20 @@ function handleFetchOTAHashes() {
     }
     
     try {
-        $found_hashes = findOtaHashesForFile($device_name, $file_name);
-        if ($found_hashes !== null) {
-            storeFetchedHashes($normalized_file_path, $found_hashes, null, $manifestModifiedAt);
+        $otaRelease = findOtaReleaseForFile($device_name, $file_name);
+        if ($otaRelease !== null) {
+            $found_hashes = [
+                'md5' => $otaRelease['md5'] ?? null,
+                'sha256' => $otaRelease['sha256'] ?? null,
+            ];
+            $isZipFile = strtolower((string)pathinfo($normalized_file_path, PATHINFO_EXTENSION)) === 'zip';
+            storeFetchedHashes(
+                $normalized_file_path,
+                $found_hashes,
+                null,
+                $isZipFile ? null : $manifestModifiedAt,
+                $isZipFile ? ($otaRelease['timestamp'] ?? null) : null
+            );
 
             http_response_code(200);
             echo json_encode([
@@ -125,63 +137,6 @@ function fetchStoredHashesForFile($normalizedFilePath, $manifestModifiedAt = nul
     }
 }
 
-function findOtaHashesForFile($deviceName, $fileName) {
-    $branches = [
-        'cnb',
-        'bka', 
-        'vic', 
-        'udc',
-        'cnb-vanilla',
-        'bka-vanilla',
-        'vic-vanilla',
-        'udc-vanilla'
-        ];
-    $deviceCandidates = [];
-    foreach ([$deviceName, strtolower((string)$deviceName)] as $candidate) {
-        $candidate = trim((string)$candidate);
-        if ($candidate !== '' && !in_array($candidate, $deviceCandidates, true)) {
-            $deviceCandidates[] = $candidate;
-        }
-    }
-
-    foreach ($deviceCandidates as $deviceCandidate) {
-        foreach ($branches as $branch) {
-            $url = 'https://raw.githubusercontent.com/Evolution-X/OTA/refs/heads/' . $branch . '/builds/' . rawurlencode($deviceCandidate) . '.json';
-            $context = stream_context_create([
-                'http' => [
-                    'timeout' => 5,
-                    'user_agent' => 'PHP-FileBrowser/1.0'
-                ],
-                'https' => [
-                    'timeout' => 5,
-                    'user_agent' => 'PHP-FileBrowser/1.0'
-                ]
-            ]);
-
-            $response = @file_get_contents($url, false, $context);
-            if ($response === false) {
-                continue;
-            }
-
-            $deviceData = json_decode($response, true);
-            if (!$deviceData || !isset($deviceData['response']) || !is_array($deviceData['response'])) {
-                continue;
-            }
-
-            foreach ($deviceData['response'] as $release) {
-                if (isset($release['filename']) && (string)$release['filename'] === $fileName) {
-                    return [
-                        'md5' => $release['md5'] ?? null,
-                        'sha256' => $release['sha256'] ?? null,
-                    ];
-                }
-            }
-        }
-    }
-
-    return null;
-}
-
 function computeBunnyHashesForFile($normalizedFilePath) {
     $normalizedPath = bunny_normalize_relative_path('/' . ltrim((string)$normalizedFilePath, '/'));
     if ($normalizedPath === '/') {
@@ -247,7 +202,13 @@ function computeBunnyHashesForFile($normalizedFilePath) {
     ];
 }
 
-function storeFetchedHashes($normalizedFilePath, array $hashes, $fileSize = null, $manifestModifiedAt = null) {
+function storeFetchedHashes(
+    $normalizedFilePath,
+    array $hashes,
+    $fileSize = null,
+    $manifestModifiedAt = null,
+    $otaJsonTimestamp = null
+) {
     try {
         $db = Database::getInstance();
         $pdo = $db->getConnection();
@@ -259,23 +220,25 @@ function storeFetchedHashes($normalizedFilePath, array $hashes, $fileSize = null
 
         if (defined('DB_TYPE') && DB_TYPE === 'mysql') {
             $stmt = $pdo->prepare('
-                INSERT INTO download_stat (`key`, count, md5, sha256, file_size, hash_source_modified_at)
-                VALUES (?, 0, ?, ?, ?, ?)
+                INSERT INTO download_stat (`key`, count, md5, sha256, file_size, hash_source_modified_at, ota_json_timestamp)
+                VALUES (?, 0, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     md5 = VALUES(md5),
                     sha256 = VALUES(sha256),
                     file_size = COALESCE(VALUES(file_size), file_size),
-                    hash_source_modified_at = COALESCE(VALUES(hash_source_modified_at), hash_source_modified_at)
+                    hash_source_modified_at = COALESCE(VALUES(hash_source_modified_at), hash_source_modified_at),
+                    ota_json_timestamp = COALESCE(VALUES(ota_json_timestamp), ota_json_timestamp)
             ');
         } else {
             $stmt = $pdo->prepare('
-                INSERT INTO download_stat (key_path, count, md5, sha256, file_size, hash_source_modified_at)
-                VALUES (?, 0, ?, ?, ?, ?)
+                INSERT INTO download_stat (key_path, count, md5, sha256, file_size, hash_source_modified_at, ota_json_timestamp)
+                VALUES (?, 0, ?, ?, ?, ?, ?)
                 ON CONFLICT(key_path) DO UPDATE SET
                     md5 = excluded.md5,
                     sha256 = excluded.sha256,
                     file_size = COALESCE(excluded.file_size, download_stat.file_size),
-                    hash_source_modified_at = COALESCE(excluded.hash_source_modified_at, download_stat.hash_source_modified_at)
+                    hash_source_modified_at = COALESCE(excluded.hash_source_modified_at, download_stat.hash_source_modified_at),
+                    ota_json_timestamp = COALESCE(excluded.ota_json_timestamp, download_stat.ota_json_timestamp)
             ');
         }
 
@@ -284,7 +247,8 @@ function storeFetchedHashes($normalizedFilePath, array $hashes, $fileSize = null
             $hashes['md5'] ?? null,
             $hashes['sha256'] ?? null,
             $fileSize,
-            $manifestModifiedAt
+            $manifestModifiedAt,
+            $otaJsonTimestamp
         ]);
 
         error_log('Stored hashes for ' . $normalizedFilePath);
