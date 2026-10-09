@@ -1,6 +1,6 @@
 <?php
 ob_start();
-$directDownloadUrl = generate_download_url($file_path, 3600, false);
+$directDownloadUrl = bunny_generate_s3_download_url($file_path, 3600);
 ?>
 
 <div class="max-w-lg mx-auto bg-[#0f172a] border-2 border-[#0060ff] shadow-[0px_0px_38.5px_14px_#0060ff20] rounded-lg shadow-md p-8 mt-8 text-center" id="download-box">

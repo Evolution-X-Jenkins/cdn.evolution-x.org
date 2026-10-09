@@ -12,14 +12,49 @@
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
 
-class DownloadRateLimiter {
-    private const WINDOW_SECONDS = 30;
-    private const MAX_REQUESTS = 5;
-    private const MULTI_USER_IP_THRESHOLD = 2;
+function download_rate_limit_settings(): array {
+    $defaults = [
+        'window_seconds' => 30,
+        'max_requests' => 5,
+        'multi_user_ip_threshold' => 2,
+        'block_ladder' => [1800, 7200, 86400],
+    ];
+    $path = __DIR__ . '/../setup/rate_limit_settings.json';
+    $decoded = is_readable($path) ? json_decode((string)file_get_contents($path), true) : null;
+    if (!is_array($decoded)) {
+        return $defaults;
+    }
 
-    // Escalation ladder in seconds. The final step is permanent.
-    private const BLOCK_LADDER = [1800, 7200, 86400];
-    private const IP_USER_ACTIVITY_TTL = self::WINDOW_SECONDS * 3;
+    $settings = $defaults;
+    foreach ([
+        'window_seconds' => [1, 3600],
+        'max_requests' => [1, 1000],
+        'multi_user_ip_threshold' => [1, 100],
+    ] as $key => [$minimum, $maximum]) {
+        $value = filter_var($decoded[$key] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => $minimum, 'max_range' => $maximum]]);
+        if ($value !== false) {
+            $settings[$key] = $value;
+        }
+    }
+
+    if (isset($decoded['block_ladder']) && is_array($decoded['block_ladder']) && count($decoded['block_ladder']) === 3) {
+        $ladder = array_map('intval', $decoded['block_ladder']);
+        if ($ladder[0] >= 60 && $ladder[2] <= 2592000 && $ladder[0] < $ladder[1] && $ladder[1] < $ladder[2]) {
+            $settings['block_ladder'] = $ladder;
+        }
+    }
+
+    return $settings;
+}
+
+$downloadRateLimitSettings = download_rate_limit_settings();
+define('DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS', $downloadRateLimitSettings['window_seconds']);
+define('DOWNLOAD_RATE_LIMIT_MAX_REQUESTS', $downloadRateLimitSettings['max_requests']);
+define('DOWNLOAD_RATE_LIMIT_MULTI_USER_IP_THRESHOLD', $downloadRateLimitSettings['multi_user_ip_threshold']);
+define('DOWNLOAD_RATE_LIMIT_BLOCK_LADDER', $downloadRateLimitSettings['block_ladder']);
+define('DOWNLOAD_RATE_LIMIT_IP_USER_ACTIVITY_TTL', DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS * 3);
+
+class DownloadRateLimiter {
     private const IDENTITY_ASSOC_RETENTION_SECONDS = 2592000;
     private const IDENTITY_ASSOC_FILE = __DIR__ . '/../../data/cache/rate_limit_identity_associations.json';
 
@@ -238,7 +273,7 @@ class DownloadRateLimiter {
         }
 
         $requestCount = $this->registerAndCountRecentRequests($identityKey);
-        if ($requestCount <= self::MAX_REQUESTS) {
+        if ($requestCount <= DOWNLOAD_RATE_LIMIT_MAX_REQUESTS) {
             return [
                 'blocked' => false,
                 'retryAfterSeconds' => 0,
@@ -249,8 +284,8 @@ class DownloadRateLimiter {
         }
 
         $nextOffense = $this->incrementOffenseCount($identityKey);
-        $isPermanent = $nextOffense > count(self::BLOCK_LADDER);
-        $blockSeconds = $isPermanent ? 0 : self::BLOCK_LADDER[$nextOffense - 1];
+        $isPermanent = $nextOffense > count(DOWNLOAD_RATE_LIMIT_BLOCK_LADDER);
+        $blockSeconds = $isPermanent ? 0 : DOWNLOAD_RATE_LIMIT_BLOCK_LADDER[$nextOffense - 1];
         $blockedUntil = $isPermanent ? null : date('Y-m-d H:i:s', time() + $blockSeconds);
 
         $incidentId = $this->db->createRateLimitIncident([
@@ -262,7 +297,7 @@ class DownloadRateLimiter {
             'route_name' => $routeName,
             'file_path' => $filePath,
             'request_id' => $requestId,
-            'window_seconds' => self::WINDOW_SECONDS,
+            'window_seconds' => DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS,
             'request_count' => $requestCount,
             'offense_level' => $nextOffense,
             'block_seconds' => $blockSeconds,
@@ -287,7 +322,7 @@ class DownloadRateLimiter {
             'ipAddress' => get_client_ip(),
             'routeName' => $routeName,
             'filePath' => $filePath,
-            'windowSeconds' => self::WINDOW_SECONDS,
+            'windowSeconds' => DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS,
             'requestCount' => $requestCount,
             'offenseLevel' => $nextOffense,
             'blockSeconds' => $blockSeconds,
@@ -335,7 +370,7 @@ class DownloadRateLimiter {
         }
 
         $requestCount = $this->registerAndCountRecentRequests($identityKey);
-        if ($requestCount <= self::MAX_REQUESTS) {
+        if ($requestCount <= DOWNLOAD_RATE_LIMIT_MAX_REQUESTS) {
             return [
                 'blocked' => false,
                 'retryAfterSeconds' => 0,
@@ -346,7 +381,7 @@ class DownloadRateLimiter {
         }
 
         $distinctUsers = $this->countRecentDistinctUsersForIp($ipAddress);
-        if ($distinctUsers < self::MULTI_USER_IP_THRESHOLD) {
+        if ($distinctUsers < DOWNLOAD_RATE_LIMIT_MULTI_USER_IP_THRESHOLD) {
             return [
                 'blocked' => false,
                 'retryAfterSeconds' => 0,
@@ -357,8 +392,8 @@ class DownloadRateLimiter {
         }
 
         $nextOffense = $this->incrementOffenseCount($identityKey);
-        $isPermanent = $nextOffense > count(self::BLOCK_LADDER);
-        $blockSeconds = $isPermanent ? 0 : self::BLOCK_LADDER[$nextOffense - 1];
+        $isPermanent = $nextOffense > count(DOWNLOAD_RATE_LIMIT_BLOCK_LADDER);
+        $blockSeconds = $isPermanent ? 0 : DOWNLOAD_RATE_LIMIT_BLOCK_LADDER[$nextOffense - 1];
         $blockedUntil = $isPermanent ? null : date('Y-m-d H:i:s', time() + $blockSeconds);
 
         $incidentId = $this->db->createRateLimitIncident([
@@ -370,7 +405,7 @@ class DownloadRateLimiter {
             'route_name' => $routeName,
             'file_path' => $filePath,
             'request_id' => $requestId,
-            'window_seconds' => self::WINDOW_SECONDS,
+            'window_seconds' => DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS,
             'request_count' => $requestCount,
             'offense_level' => $nextOffense,
             'block_seconds' => $blockSeconds,
@@ -397,7 +432,7 @@ class DownloadRateLimiter {
             'ipAddress' => get_client_ip(),
             'routeName' => $routeName,
             'filePath' => $filePath,
-            'windowSeconds' => self::WINDOW_SECONDS,
+            'windowSeconds' => DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS,
             'requestCount' => $requestCount,
             'offenseLevel' => $nextOffense,
             'blockSeconds' => $blockSeconds,
@@ -427,7 +462,7 @@ class DownloadRateLimiter {
         if ($this->redisAvailable) {
             try {
                 $now = time();
-                $windowStart = $now - self::WINDOW_SECONDS;
+                $windowStart = $now - DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS;
                 $ipUserKey = 'rl:ipusers:' . hash('sha256', $ipAddress);
                 $this->redis->zRemRangeByScore($ipUserKey, 0, $windowStart - 1);
                 return (int)$this->redis->zCard($ipUserKey);
@@ -436,7 +471,7 @@ class DownloadRateLimiter {
             }
         }
 
-        return (int)$this->db->countRecentDistinctUsersByIpIdentity($this->identityKey('ip', $ipAddress), self::WINDOW_SECONDS);
+        return (int)$this->db->countRecentDistinctUsersByIpIdentity($this->identityKey('ip', $ipAddress), DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS);
     }
 
     private function registerIpUserActivity(string $ipAddress, string $userId): void {
@@ -446,11 +481,11 @@ class DownloadRateLimiter {
 
         try {
             $now = time();
-            $windowStart = $now - self::WINDOW_SECONDS;
+            $windowStart = $now - DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS;
             $ipUserKey = 'rl:ipusers:' . hash('sha256', $ipAddress);
             $this->redis->zAdd($ipUserKey, $now, $userId);
             $this->redis->zRemRangeByScore($ipUserKey, 0, $windowStart - 1);
-            $this->redis->expire($ipUserKey, self::IP_USER_ACTIVITY_TTL);
+            $this->redis->expire($ipUserKey, DOWNLOAD_RATE_LIMIT_IP_USER_ACTIVITY_TTL);
         } catch (Exception $e) {
             error_log('Rate limiter IP distinct-user track failed: ' . $e->getMessage());
         }
@@ -552,22 +587,22 @@ class DownloadRateLimiter {
     private function registerAndCountRecentRequests(string $identityKey): int {
         if (!$this->redisAvailable) {
             // DB fallback approximation when Redis is unavailable.
-            return $this->db->countRecentRequestsByIdentity($identityKey, self::WINDOW_SECONDS);
+            return $this->db->countRecentRequestsByIdentity($identityKey, DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS);
         }
 
         $now = time();
-        $windowStart = $now - self::WINDOW_SECONDS;
+        $windowStart = $now - DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS;
         $requestKey = 'rl:req:' . $identityKey;
 
         try {
             $member = $now . '-' . bin2hex(random_bytes(4));
             $this->redis->zAdd($requestKey, $now, $member);
             $this->redis->zRemRangeByScore($requestKey, 0, $windowStart - 1);
-            $this->redis->expire($requestKey, self::WINDOW_SECONDS * 3);
+            $this->redis->expire($requestKey, DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS * 3);
             return (int)$this->redis->zCard($requestKey);
         } catch (Exception $e) {
             error_log('Rate limiter request counter failed: ' . $e->getMessage());
-            return $this->db->countRecentRequestsByIdentity($identityKey, self::WINDOW_SECONDS);
+            return $this->db->countRecentRequestsByIdentity($identityKey, DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS);
         }
     }
 

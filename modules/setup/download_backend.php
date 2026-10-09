@@ -1,7 +1,7 @@
 <?php
 /**
  * Bunny Download Handler
- * Streams downloads from Bunny Storage through the PHP SDK.
+ * Redirects downloads to short-lived Bunny S3 presigned URLs.
  */
 
 require_once __DIR__ . '/config.php';
@@ -10,7 +10,7 @@ require_once __DIR__ . '/bunny_storage.php';
 function redirect_to_download_backend($file_path, $use_fallback = false) {
     log_action('Download initiated', $file_path);
 
-    $downloadUrl = generate_download_url($file_path, DOWNLOAD_URL_EXPIRY, false);
+    $downloadUrl = bunny_generate_s3_download_url($file_path, DOWNLOAD_URL_EXPIRY);
     if (empty($downloadUrl)) {
         error_log("No presigned S3/Bunny URL available for {$file_path}");
         log_action('Download failed - no presigned URL', $file_path);

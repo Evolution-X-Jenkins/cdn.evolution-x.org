@@ -5,6 +5,7 @@
  */
 
 require_once __DIR__ . '/../setup/config.php';
+require_once __DIR__ . '/../setup/bunny_storage.php';
 require_once __DIR__ . '/manifest_index.php';
 require_once __DIR__ . '/../setup/database.php';
 require_once __DIR__ . '/rate_limit.php';
@@ -159,8 +160,8 @@ function check_download_status() {
     try {
         // Test Bunny download URL generation
         $test_file = 'test-file.txt'; // This does not need to exist for URL generation
-        $primary_url = generate_download_url($test_file, DOWNLOAD_URL_EXPIRY, false);
-        $fallback_url = generate_download_url($test_file, DOWNLOAD_URL_EXPIRY, true);
+        $primary_url = bunny_generate_s3_download_url($test_file, DOWNLOAD_URL_EXPIRY);
+        $fallback_url = $primary_url;
         
         $using_proxy = false;
         $context = stream_context_create([

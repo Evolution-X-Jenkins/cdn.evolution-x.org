@@ -601,6 +601,9 @@ Response format:
 BUNNY_STORAGE_ZONE=your-storage-zone
 BUNNY_STORAGE_ACCESS_KEY=your-storage-access-key
 BUNNY_STORAGE_REGION=de
+BUNNY_S3_ACCESS_KEY=your-s3-access-key
+BUNNY_S3_SECRET_KEY=your-s3-secret-key
+BUNNY_S3_ENDPOINT=
 BUNNY_DOWNLOAD_BASE_URL=https://downloads.example.com
 BUNNY_FALLBACK_DOMAINS=downloads-backup.example.com
 

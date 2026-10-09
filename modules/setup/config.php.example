@@ -38,6 +38,9 @@ define('SITE_TITLE', 'Bunny File Browser');
 define('BUNNY_STORAGE_ZONE', getenv('BUNNY_STORAGE_ZONE') ?: 'your-storage-zone');
 define('BUNNY_STORAGE_ACCESS_KEY', getenv('BUNNY_STORAGE_ACCESS_KEY') ?: 'your-storage-access-key');
 define('BUNNY_STORAGE_REGION', strtolower((string)(getenv('BUNNY_STORAGE_REGION') ?: 'de')));
+define('BUNNY_S3_ACCESS_KEY', trim((string)(getenv('BUNNY_S3_ACCESS_KEY') ?: '')));
+define('BUNNY_S3_SECRET_KEY', trim((string)(getenv('BUNNY_S3_SECRET_KEY') ?: '')));
+define('BUNNY_S3_ENDPOINT', trim((string)(getenv('BUNNY_S3_ENDPOINT') ?: '')));
 define('BUNNY_DOWNLOAD_BASE_URL', trim((string)(getenv('BUNNY_DOWNLOAD_BASE_URL') ?: 'https://downloads.example.com')));
 define('BUNNY_FALLBACK_DOMAINS', array_values(array_filter(array_map('trim', explode(',', (string)(getenv('BUNNY_FALLBACK_DOMAINS') ?: ''))), static function ($value) {
     return $value !== '';

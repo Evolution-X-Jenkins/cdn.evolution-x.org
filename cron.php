@@ -13,6 +13,7 @@ if (isset($_SERVER['HTTP_HOST'])) {
 }
 
 require_once __DIR__ . '/modules/setup/config.php';
+require_once __DIR__ . '/modules/setup/bunny_storage.php';
 require_once __DIR__ . '/modules/core/bucket_cache.php';
 require_once __DIR__ . '/modules/setup/database.php';
 require_once __DIR__ . '/modules/core/cache.php';
@@ -434,8 +435,8 @@ try {
 log_message("Performing health checks...");
 try {
     // Test Bunny download URL generation
-    if (function_exists('generate_download_url')) {
-        $test_url = generate_download_url('health-test.txt', 60, false);
+    if (function_exists('bunny_generate_s3_download_url')) {
+        $test_url = bunny_generate_s3_download_url('health-test.txt', 60);
         if ($test_url) {
             log_message("Bunny download URL generation: OK");
         } else {

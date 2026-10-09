@@ -54,6 +54,96 @@ function bunny_sanitize_download_filename($path) {
 	return $safeFileName;
 }
 
+function bunny_s3_encode_path($path) {
+	$segments = explode('/', trim((string)$path, '/'));
+	return implode('/', array_map('rawurlencode', $segments));
+}
+
+function bunny_s3_build_query(array $parameters) {
+	ksort($parameters);
+	$pairs = [];
+	foreach ($parameters as $name => $value) {
+		$pairs[] = rawurlencode((string)$name) . '=' . rawurlencode((string)$value);
+	}
+
+	return implode('&', $pairs);
+}
+
+function bunny_generate_s3_download_url($objectKey, $expiresSeconds = 3600) {
+	$objectKey = function_exists('normalize_download_object_key')
+		? normalize_download_object_key($objectKey)
+		: ltrim((string)$objectKey, '/');
+	if ($objectKey === '') {
+		return null;
+	}
+
+	$accessKey = defined('BUNNY_S3_ACCESS_KEY') ? trim((string)BUNNY_S3_ACCESS_KEY) : '';
+	$secretKey = defined('BUNNY_S3_SECRET_KEY') ? trim((string)BUNNY_S3_SECRET_KEY) : '';
+	$bucket = defined('BUNNY_STORAGE_ZONE') ? trim((string)BUNNY_STORAGE_ZONE) : '';
+	if ($accessKey === '' || $secretKey === '' || $bucket === '') {
+		return null;
+	}
+
+	$region = defined('BUNNY_STORAGE_REGION') ? strtolower(trim((string)BUNNY_STORAGE_REGION)) : '';
+	if ($region === '') {
+		$region = 'de';
+	}
+
+	$endpoint = defined('BUNNY_S3_ENDPOINT') ? trim((string)BUNNY_S3_ENDPOINT) : '';
+	if ($endpoint === '') {
+		$endpoint = 'https://' . $region . '-s3.storage.bunnycdn.com';
+	}
+
+	$scheme = parse_url($endpoint, PHP_URL_SCHEME);
+	$host = parse_url($endpoint, PHP_URL_HOST);
+	$port = parse_url($endpoint, PHP_URL_PORT);
+	$basePath = parse_url($endpoint, PHP_URL_PATH);
+	if (!is_string($scheme) || $scheme === '' || !is_string($host) || $host === '') {
+		error_log('Invalid BUNNY_S3_ENDPOINT: ' . $endpoint);
+		return null;
+	}
+
+	$canonicalHost = strtolower($host);
+	if (is_int($port)) {
+		$canonicalHost .= ':' . $port;
+	}
+
+	$canonicalUri = '/' . bunny_s3_encode_path($bucket) . '/' . bunny_s3_encode_path($objectKey);
+	if (is_string($basePath) && trim($basePath, '/') !== '') {
+		$canonicalUri = '/' . bunny_s3_encode_path($basePath) . $canonicalUri;
+	}
+
+	$expires = min(604800, max(1, (int)$expiresSeconds));
+	$timestamp = gmdate('Ymd\THis\Z');
+	$date = substr($timestamp, 0, 8);
+	$scope = $date . '/' . $region . '/s3/aws4_request';
+	$query = [
+		'X-Amz-Algorithm' => 'AWS4-HMAC-SHA256',
+		'X-Amz-Credential' => $accessKey . '/' . $scope,
+		'X-Amz-Date' => $timestamp,
+		'X-Amz-Expires' => (string)$expires,
+		'X-Amz-SignedHeaders' => 'host',
+	];
+	$canonicalQuery = bunny_s3_build_query($query);
+	$canonicalRequest = "GET\n"
+		. $canonicalUri . "\n"
+		. $canonicalQuery . "\n"
+		. 'host:' . $canonicalHost . "\n\n"
+		. "host\nUNSIGNED-PAYLOAD";
+	$stringToSign = "AWS4-HMAC-SHA256\n"
+		. $timestamp . "\n"
+		. $scope . "\n"
+		. hash('sha256', $canonicalRequest);
+
+	$dateKey = hash_hmac('sha256', $date, 'AWS4' . $secretKey, true);
+	$regionKey = hash_hmac('sha256', $region, $dateKey, true);
+	$serviceKey = hash_hmac('sha256', 's3', $regionKey, true);
+	$signingKey = hash_hmac('sha256', 'aws4_request', $serviceKey, true);
+	$signature = hash_hmac('sha256', $stringToSign, $signingKey);
+
+	return $scheme . '://' . $canonicalHost . $canonicalUri . '?' . $canonicalQuery . '&X-Amz-Signature=' . $signature;
+}
+
 function bunny_stream_download_file($objectKey, $downloadPath, $fallbackMode = false) {
 	$objectKey = ltrim((string)$objectKey, '/');
 	if ($objectKey === '') {
