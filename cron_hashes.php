@@ -17,6 +17,7 @@ if (isset($_SERVER['HTTP_HOST'])) {
 
 require_once __DIR__ . '/modules/setup/config.php';
 require_once __DIR__ . '/modules/setup/database.php';
+require_once __DIR__ . '/modules/core/cache.php';
 require_once __DIR__ . '/modules/core/ota_hashes.php';
 
 function cron_env_bool($name, $default = false) {
@@ -238,6 +239,83 @@ hash_log('Lock file: ' . $lockFile);
 hash_log('Scan root: ' . $scanRoot);
 hash_log('Dry run: ' . ($options['dryRun'] ? 'yes' : 'no'));
 
+try {
+    hash_log('Stage: OTA ZIP freshness check');
+    $pdo = Database::getInstance()->getConnection();
+    $hashCache = CacheManager::getInstance();
+    ensure_download_stat_table($pdo);
+
+    $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
+    $zipRows = $pdo->query(
+        'SELECT ' . $keyColumn . ' AS file_key, md5, sha256, ota_json_timestamp
+         FROM download_stat
+         WHERE LOWER(' . $keyColumn . ') LIKE \'%.zip\''
+    )->fetchAll();
+    $updateOtaStmt = $pdo->prepare(
+        'UPDATE download_stat
+         SET md5 = ?, sha256 = ?, ota_json_timestamp = ?
+         WHERE ' . $keyColumn . ' = ?'
+    );
+
+    $otaChecked = 0;
+    $otaUpdated = 0;
+    $otaNotFound = 0;
+
+    foreach ($zipRows as $zipRow) {
+        $relativePath = ltrim(str_replace('\\', '/', (string)($zipRow['file_key'] ?? '')), '/');
+        if ($relativePath === '') {
+            continue;
+        }
+
+        $pathParts = explode('/', $relativePath);
+        $deviceName = $pathParts[0] ?? '';
+        $otaRelease = findOtaReleaseForFile($deviceName, basename($relativePath));
+        $otaChecked++;
+
+        if ($otaRelease === null) {
+            $otaNotFound++;
+            continue;
+        }
+
+        $otaTimestamp = isset($otaRelease['timestamp']) ? (int)$otaRelease['timestamp'] : 0;
+        $storedOtaTimestamp = isset($zipRow['ota_json_timestamp'])
+            ? (int)$zipRow['ota_json_timestamp']
+            : 0;
+        $otaMd5 = (string)($otaRelease['md5'] ?? '');
+        $otaSha256 = (string)($otaRelease['sha256'] ?? '');
+
+        if ($otaTimestamp <= 0 || $otaMd5 === '' || $otaSha256 === '' || $storedOtaTimestamp === $otaTimestamp) {
+            continue;
+        }
+
+        hash_log(
+            'File: ' . $relativePath .
+            ' | stage=ota-refresh' .
+            ' | old_timestamp=' . ($storedOtaTimestamp > 0 ? $storedOtaTimestamp : 'null') .
+            ' | new_timestamp=' . $otaTimestamp .
+            ' | branch=' . ($otaRelease['branch'] ?? 'unknown')
+        );
+
+        if ($options['dryRun']) {
+            continue;
+        }
+
+        $updateOtaStmt->execute([$otaMd5, $otaSha256, $otaTimestamp, $relativePath]);
+        $hashCache->delete('hash:' . $relativePath);
+        $otaUpdated++;
+    }
+
+    hash_log(
+        'OTA ZIP freshness check complete: checked=' . $otaChecked .
+        ', updated=' . $otaUpdated .
+        ', not_found=' . $otaNotFound
+    );
+} catch (Throwable $e) {
+    hash_log('ERROR: OTA ZIP freshness check failed: ' . $e->getMessage());
+    release_hash_lock($lockHandle);
+    exit(1);
+}
+
 $remoteMount = cron_is_remote_mount_path($scanRoot);
 $allowRemoteScan = $options['allowRemoteScan'] || cron_env_bool('ENABLE_HASH_SCAN_ON_REMOTE', false);
 
@@ -268,12 +346,6 @@ $startTime = microtime(true);
 
 try {
     hash_log('Stage: database setup');
-    $pdo = Database::getInstance()->getConnection();
-    require_once __DIR__ . '/modules/core/cache.php';
-    $hashCache = CacheManager::getInstance();
-    ensure_download_stat_table($pdo);
-
-    $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
 
     $selectStmt = $pdo->prepare(
         'SELECT count, md5, sha256, file_size, ota_json_timestamp FROM download_stat WHERE ' . $keyColumn . ' = ? LIMIT 1'
