@@ -355,7 +355,7 @@ sudo systemctl reload apache2
    # Cache maintenance every 5 minutes (includes stats dashboard JSON snapshot)
    */5 * * * * /usr/bin/php /var/www/filebrowser/cron.php >> /var/www/filebrowser/logs/cron.log 2>&1
 
-   # Hash sync every 30 minutes (also refreshes ZIP hashes when the matching OTA timestamp changes)
+   # Check every stored ZIP against OTA metadata and refresh changed hashes every 30 minutes
    */30 * * * * /usr/bin/php /var/www/filebrowser/cron_hashes.php >> /var/www/filebrowser/logs/cron_hashes.log 2>&1
 
    # Push queue processing every minute
