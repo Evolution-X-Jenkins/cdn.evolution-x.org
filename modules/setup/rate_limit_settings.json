@@ -1,0 +1,10 @@
+{
+    "window_seconds": 30,
+    "max_requests": 10,
+    "multi_user_ip_threshold": 2,
+    "block_ladder": [
+        1800,
+        7200,
+        86400
+    ]
+}
