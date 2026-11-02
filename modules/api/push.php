@@ -371,7 +371,7 @@ function validateAndResolvePushRequest($codename, $date, $version, $buildType, $
     }
 
     $versionInt = (int)$version;
-    if (!in_array($versionInt, [14, 15, 16], true)) {
+    if (!in_array($versionInt, [14, 15, 16, 17 ], true)) {
         error_log("[$requestId] VALIDATION ERROR: Invalid version '$version'");
         return ['success' => false, 'APICode' => 'T-0002'];
     }
