@@ -371,7 +371,7 @@ function validateAndResolvePushRequest($codename, $date, $version, $buildType, $
     }
 
     $versionInt = (int)$version;
-    if (!in_array($versionInt, [14, 15, 16, 17 ], true)) {
+    if (!in_array($versionInt, [14, 15, 16, 17], true)) {
         error_log("[$requestId] VALIDATION ERROR: Invalid version '$version'");
         return ['success' => false, 'APICode' => 'T-0002'];
     }
@@ -383,16 +383,18 @@ function validateAndResolvePushRequest($codename, $date, $version, $buildType, $
     }
 
     $sourceDate = str_replace('-', '', $date);
-    if ($buildType === 'gapps') {
-        $sourcePath = PRE_RELEASE_PATH . "/$codename/$versionInt/$sourceDate";
-        $destPath = "/$codename/$versionInt";
-    } else {
-        $sourcePath = PRE_RELEASE_PATH . "/$codename/$versionInt/{$sourceDate}_Vanilla";
-        $destPath = "/$codename/{$versionInt}_vanilla";
+    $sourcePath = resolvePreReleaseSourcePath($codename, $versionInt, $sourceDate, $buildType, $requestId);
+    if ($sourcePath === null) {
+        $available = getAvailablePreReleaseBuildsForDebug($codename, $versionInt); 
+        $availableText = $available !== '' ? ' Available builds: ' . $available : ' No build directories were found under the codename/version path.';
+        error_log("[$requestId] SOURCE ERROR: Directory not found for codename=$codename version=$versionInt buildType=$buildType date=$date$availableText");
+        return ['success' => false, 'APICode' => 'T-0005'];
     }
 
-    if (!isPushSourcePathAccessible($sourcePath, $requestId)) {
-        return ['success' => false, 'APICode' => 'T-0005'];
+    if ($buildType === 'gapps') {
+        $destPath = "/$codename/$versionInt";
+    } else {
+        $destPath = "/$codename/{$versionInt}_vanilla";
     }
 
     return [
@@ -406,9 +408,90 @@ function validateAndResolvePushRequest($codename, $date, $version, $buildType, $
     ];
 }
 
+function resolvePreReleaseSourcePath($codename, $version, $sourceDate, $buildType, $requestId = 'unknown') {
+    $codename = trim((string)$codename, '/');
+    $versionRoot = PRE_RELEASE_PATH . '/' . $codename . '/' . (string)$version;
+    if (!is_dir($versionRoot)) {
+        error_log("[$requestId] SOURCE ERROR: Version directory missing at $versionRoot");
+        return null;
+    }
+
+    $candidates = [];
+    if ($buildType === 'gapps') {
+        $candidates[] = $sourceDate;
+    } else {
+        $candidates[] = $sourceDate . '_Vanilla';
+    }
+
+    foreach ($candidates as $candidate) {
+        $candidatePath = $versionRoot . '/' . $candidate;
+        if (is_dir($candidatePath)) {
+            return $candidatePath;
+        }
+    }
+
+    $entries = @scandir($versionRoot);
+    if (is_array($entries)) {
+        $matches = [];
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..' || !is_dir($versionRoot . '/' . $entry)) {
+                continue;
+            }
+
+            $entryName = (string)$entry;
+            if ($buildType === 'vanilla') {
+                if (strpos($entryName, $sourceDate) === 0 && substr($entryName, -strlen('_Vanilla')) === '_Vanilla') {
+                    $matches[] = $entryName;
+                }
+            } else {
+                if (strpos($entryName, $sourceDate) === 0 && substr($entryName, -strlen('_Vanilla')) !== '_Vanilla') {
+                    $matches[] = $entryName;
+                }
+            }
+        }
+
+        if (!empty($matches)) {
+            sort($matches, SORT_STRING);
+            return $versionRoot . '/' . $matches[0];
+        }
+    }
+
+    return null;
+}
+
+function getAvailablePreReleaseBuildsForDebug($codename, $version) {
+    $versionRoot = PRE_RELEASE_PATH . '/' . trim((string)$codename, '/') . '/' . (string)$version;
+    if (!is_dir($versionRoot)) {
+        return '';
+    }
+
+    $entries = @scandir($versionRoot);
+    if (!is_array($entries)) {
+        return '';
+    }
+
+    $names = [];
+    foreach ($entries as $entry) {
+        if ($entry === '.' || $entry === '..' || !is_dir($versionRoot . '/' . $entry)) {
+            continue;
+        }
+        $names[] = $entry;
+    }
+
+    sort($names, SORT_STRING);
+    return implode(', ', array_slice($names, 0, 20));
+}
+
 function isPushSourcePathAccessible($sourcePath, $requestId = 'unknown') {
+    clearstatcache(true, $sourcePath);
+
     $pathExists = is_dir($sourcePath);
     if ($pathExists) {
+        return true;
+    }
+
+    $resolved = realpath($sourcePath);
+    if ($resolved !== false && is_dir($resolved)) {
         return true;
     }
 
