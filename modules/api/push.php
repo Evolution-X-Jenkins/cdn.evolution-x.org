@@ -384,10 +384,10 @@ function validateAndResolvePushRequest($codename, $date, $version, $buildType, $
 
     $sourceDate = str_replace('-', '', $date);
     if ($buildType === 'gapps') {
-        $sourcePath = PRE_RELEASE_PATH . "/$codename/$sourceDate";
+        $sourcePath = PRE_RELEASE_PATH . "/$codename/$versionInt/$sourceDate";
         $destPath = "/$codename/$versionInt";
     } else {
-        $sourcePath = PRE_RELEASE_PATH . "/$codename/{$sourceDate}_Vanilla";
+        $sourcePath = PRE_RELEASE_PATH . "/$codename/$versionInt/{$sourceDate}_Vanilla";
         $destPath = "/$codename/{$versionInt}_vanilla";
     }
 
