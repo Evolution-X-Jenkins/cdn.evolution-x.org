@@ -271,30 +271,17 @@ function bunny_watch_queue_mirror_job($sourceDirectory, $requestedBy = 'watcher'
                 ];
             }
 
-            $nowExpr = getDatabaseNowExpression();
-            $requeueSql = "UPDATE push_release_queue
-                SET status = 'queued',
-                    success = NULL,
-                    error_message = NULL,
-                    callback_http_code = NULL,
-                    callback_response = NULL,
-                    started_at = NULL,
-                    completed_at = NULL,
-                    requested_by = ?,
-                    updated_at = $nowExpr
-                WHERE id = ?";
-            $requeueStmt = $db->prepare($requeueSql);
-            $requeueStmt->execute([$requestedBy, (int)$existingJob['id']]);
-
-            return [
-                'status' => 'queued',
-                'jobId' => (int)($existingJob['id'] ?? 0),
-                'sourcePath' => $sourceDirectory,
-                'destinationPath' => $destinationPath,
-                'existing' => true,
-                'requeued' => true,
-                'existingStatus' => $existingStatus,
-            ];
+            if (in_array($existingStatus, ['completed', 'failed'], true)) {
+                return [
+                    'status' => 'skipped',
+                    'jobId' => (int)($existingJob['id'] ?? 0),
+                    'sourcePath' => $sourceDirectory,
+                    'destinationPath' => $destinationPath,
+                    'existing' => true,
+                    'existingStatus' => $existingStatus,
+                    'message' => 'Existing job already resolved; manual retry required to requeue this source path.',
+                ];
+            }
         }
 
         $stmt = $db->prepare('
