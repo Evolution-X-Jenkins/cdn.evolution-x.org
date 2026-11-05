@@ -1,759 +1,290 @@
 <?php
 /**
- * Push API Module
+ * Clean rewrite of the push API flow.
+ *
+ * Flow:
+ * 1. Receive JSON payload
+ * 2. Validate payload
+ * 3. Pull source directory from BackBlaze into internal tmp_push staging
+ * 4. Verify staging copy
+ * 5. Upload files to Bunny
+ * 6. Verify Bunny upload integrity
+ * 7. Post webhook update
+ *
+ * Error-code compatibility remains: T-0002, T-0003, T-0005, T-0006, T-0007, T-0008
  */
 
-// Enable error logging to a specific file
 ini_set('log_errors', 1);
-ini_set('error_log', __DIR__ . '/../../logs/push_api.log');
+$pushLogDir = __DIR__ . '/../../logs';
+if (!is_dir($pushLogDir) && !@mkdir($pushLogDir, 0755, true) && !is_dir($pushLogDir)) {
+    $pushLogDir = sys_get_temp_dir();
+}
+ini_set('error_log', rtrim($pushLogDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'push_new_api.log');
 
 require_once __DIR__ . '/../setup/config.php';
 require_once __DIR__ . '/../setup/database.php';
 require_once __DIR__ . '/../setup/bunny_storage.php';
 require_once __DIR__ . '/../core/file_operations.php';
-require_once __DIR__ . '/../core/bucket_cache.php';
-require_once __DIR__ . '/../core/cache.php';
 
-function logPushApiExit($result, $requestId = null, $context = '') {
-    $timestamp = date('Y-m-d H:i:s');
-    $id = $requestId ?: 'unknown';
-
-    error_log("[$timestamp] PUSH API EXIT - ID: $id");
-    error_log("[$timestamp] Exit Context: $context");
-    error_log("[$timestamp] Result: " . json_encode($result));
-    error_log("[$timestamp] PUSH API REQUEST END - ID: $id");
-    error_log('');
+function push_new_log($message) {
+    error_log('[push_new] ' . $message);
 }
 
-function handlePushApi($method, $pathParts) {
-    $timestamp = date('Y-m-d H:i:s');
-    $clientIP = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $userAgentRaw = $_SERVER['HTTP_USER_AGENT'] ?? 'unknown';
-    $requestId = uniqid('push_', true);
-
-    error_log("[$timestamp] PUSH API REQUEST START - ID: $requestId");
-    error_log("[$timestamp] Method: $method, IP: $clientIP");
-    error_log("[$timestamp] User-Agent: $userAgentRaw");
-    error_log("[$timestamp] Path Parts: " . json_encode($pathParts));
-
-    $rawInput = file_get_contents('php://input');
-    if (!empty($rawInput)) {
-        error_log("[$timestamp] Raw POST data: " . substr($rawInput, 0, 500));
-    } else {
-        error_log("[$timestamp] No POST data received");
+function push_new_is_authorized() {
+    $userAgent = strtolower((string)($_SERVER['HTTP_USER_AGENT'] ?? ''));
+    if (strpos($userAgent, 'evoxupdater') !== false) {
+        return true;
     }
 
-    if ($method !== 'POST') {
-        $result = [
-            'status' => 'error',
-            'APICode' => 'T-0002'
-        ];
-        logPushApiExit($result, $requestId, 'Invalid HTTP method');
-        return $result;
-    }
+    $token = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['HTTP_X_API_KEY'] ?? '';
+    $token = preg_replace('/^Bearer\s+/i', '', (string)$token);
+    $token = trim((string)$token);
 
-    $identity = resolvePushApiIdentity();
-    if (!$identity['authorized']) {
-        $result = [
-            'status' => 'error',
-            'APICode' => 'T-0003'
-        ];
-        logPushApiExit($result, $requestId, 'Authentication failed');
-        return $result;
-    }
+    $allowed = array_filter(array_map('trim', [
+        (string)(getenv('PUSH_API_TOKEN') ?: ''),
+        (string)(getenv('BUNNY_PUSH_API_TOKEN') ?: ''),
+    ]), static function ($value) {
+        return $value !== '';
+    });
 
-    $username = $identity['username'];
-
-    try {
-        $parsed = parsePushRequestPayload($pathParts, $rawInput);
-        if (!$parsed['success']) {
-            $result = [
-                'status' => 'error',
-                'APICode' => 'T-0002'
-            ];
-            logPushApiExit($result, $requestId, $parsed['error']);
-            return $result;
-        }
-
-        $payload = $parsed['payload'];
-
-        $result = processPushRequest(
-            $payload['codename'],
-            $payload['date'],
-            $payload['version'],
-            $payload['buildType'],
-            $username
-        );
-
-        logPushApiExit($result, $requestId, 'Queued request');
-        return $result;
-    } catch (Exception $e) {
-        error_log("Unexpected error in push API: " . $e->getMessage());
-        $result = [
-            'status' => 'error',
-            'APICode' => 'T-0006'
-        ];
-        logPushApiExit($result, $requestId, 'Exception caught: ' . $e->getMessage());
-        return $result;
-    }
+    return $token !== '' && in_array($token, $allowed, true);
 }
 
-function handlePushJobsApi($method, $pathParts) {
+function push_new_json_response($payload, $statusCode = 200) {
+    http_response_code($statusCode);
+    header('Content-Type: application/json');
+    echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    return null;
+}
+
+function handlePushJobsApi($method, $pathParts = []) {
     if ($method !== 'GET') {
         return [
             'success' => false,
-            'error' => 'Method not allowed',
-            'APICode' => 'T-0002'
-        ];
-    }
-
-    $identity = resolvePushApiIdentity();
-    if (!$identity['authorized']) {
-        return [
-            'success' => false,
-            'error' => 'Unauthorized',
-            'APICode' => 'T-0003'
-        ];
-    }
-
-    try {
-        $db = Database::getInstance()->getConnection();
-        $statusFilter = strtolower(trim($_GET['status'] ?? ''));
-        $limit = (int)($_GET['limit'] ?? 100);
-        $limit = max(1, min(500, $limit));
-
-        $allowedStatuses = ['queued', 'processing', 'completed', 'failed'];
-        if (!empty($statusFilter) && !in_array($statusFilter, $allowedStatuses, true)) {
-            return [
-                'success' => false,
-                'error' => 'Invalid status filter. Allowed: queued, processing, completed, failed',
-                'APICode' => 'T-0002'
-            ];
-        }
-
-        $singleJobId = null;
-        if (!empty($pathParts)) {
-            $candidate = (string)$pathParts[0];
-            if (ctype_digit($candidate)) {
-                $singleJobId = (int)$candidate;
-            }
-        }
-
-        if ($singleJobId !== null) {
-            $stmt = $db->prepare('SELECT * FROM push_release_queue WHERE id = ? LIMIT 1');
-            $stmt->execute([$singleJobId]);
-            $job = $stmt->fetch();
-
-            return [
-                'success' => true,
-                'data' => [
-                    'job' => $job ? normalizePushJobRow($job) : null
-                ]
-            ];
-        }
-
-        $params = [];
-        $where = '';
-        if (!empty($statusFilter)) {
-            $where = 'WHERE status = ?';
-            $params[] = $statusFilter;
-        }
-
-        $stmt = $db->prepare("SELECT * FROM push_release_queue $where ORDER BY id DESC LIMIT $limit");
-        $stmt->execute($params);
-        $jobs = $stmt->fetchAll();
-
-        $countStmt = $db->query('SELECT status, COUNT(*) as total FROM push_release_queue GROUP BY status');
-        $counts = [
-            'queued' => 0,
-            'processing' => 0,
-            'completed' => 0,
-            'failed' => 0
-        ];
-
-        foreach ($countStmt->fetchAll() as $row) {
-            if (isset($counts[$row['status']])) {
-                $counts[$row['status']] = (int)$row['total'];
-            }
-        }
-
-        return [
-            'success' => true,
-            'data' => [
-                'summary' => $counts,
-                'jobs' => array_map('normalizePushJobRow', $jobs)
-            ]
-        ];
-    } catch (Exception $e) {
-        return [
-            'success' => false,
-            'error' => 'Failed to fetch push jobs: ' . $e->getMessage(),
-            'APICode' => 'T-0006'
-        ];
-    }
-}
-
-function resolvePushApiIdentity() {
-    $userAgent = strtolower($_SERVER['HTTP_USER_AGENT'] ?? '');
-    $isEvoxUpdater = strpos($userAgent, 'evoxupdater') !== false;
-
-    if ($isEvoxUpdater) {
-        return [
-            'authorized' => true,
-            'username' => 'evoxupdater'
-        ];
-    }
-
-    $authToken = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['HTTP_X_API_KEY'] ?? '';
-    $authToken = str_replace('Bearer ', '', $authToken);
-
-    if (!validatePushToken($authToken)) {
-        return [
-            'authorized' => false,
-            'username' => 'unknown'
-        ];
-    }
-
-    return [
-        'authorized' => true,
-        'username' => 'api_user'
-    ];
-}
-
-function parsePushRequestPayload($pathParts, $rawInput) {
-    if (!empty($pathParts) && count($pathParts) >= 4) {
-        return [
-            'success' => true,
-            'payload' => [
-                'codename' => $pathParts[0],
-                'date' => $pathParts[1],
-                'version' => strval($pathParts[2]),
-                'buildType' => $pathParts[3]
-            ]
-        ];
-    }
-
-    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
-
-    if (strpos($contentType, 'application/x-www-form-urlencoded') === 0) {
-        $data = $_POST;
-    } else {
-        $data = json_decode($rawInput, true);
-    }
-
-    if (!$data || !is_array($data)) {
-        return [
-            'success' => false,
-            'error' => 'Invalid request payload'
+            'status' => 'error',
+            'APICode' => 'T-0002',
+            'message' => 'Method not allowed',
         ];
     }
 
     return [
         'success' => true,
-        'payload' => [
-            'codename' => $data['codename'] ?? '',
-            'date' => $data['date'] ?? '',
-            'version' => strval($data['version'] ?? ''),
-            'buildType' => $data['buildType'] ?? ''
-        ]
+        'status' => 'ok',
+        'APICode' => 'T-0007',
+        'message' => 'Push jobs queue is processed by cron; no direct job listing endpoint is active',
+        'jobs' => [],
     ];
 }
 
-function validatePushToken($token) {
-    $validTokens = [
-        getenv('PUSH_API_TOKEN')
-    ];
-
-    return in_array($token, array_filter($validTokens));
-}
-
-function processPushRequest($codename, $date, $version, $buildType, $username = 'unknown') {
-    $requestId = (int)(microtime(true) * 1000) . '_' . getmypid() . '_' . $codename . '_' . $date;
-    error_log(">>> PROCESS_PUSH_REQUEST START (QUEUE MODE) - ID: $requestId");
-
-    try {
-        $resolved = validateAndResolvePushRequest($codename, $date, $version, $buildType, $requestId);
-        if (!$resolved['success']) {
-            return [
-                'status' => 'error',
-                'APICode' => $resolved['APICode']
-            ];
-        }
-
-        $callbackConfig = getPushCompletionCallbackConfig();
-
-        $db = Database::getInstance()->getConnection();
-        $stmt = $db->prepare('
-            INSERT INTO push_release_queue
-                (codename, release_date, version, build_type, requested_by, source_path, destination_path, status, callback_enabled, callback_url)
-            VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ');
-
-        $stmt->execute([
-            $resolved['codename'],
-            $resolved['date'],
-            $resolved['version'],
-            $resolved['buildType'],
-            $username,
-            $resolved['sourcePath'],
-            $resolved['destPath'],
-            'queued',
-            $callbackConfig['enabled'] ? 1 : 0,
-            $callbackConfig['url']
-        ]);
-
-        $jobId = (int)$db->lastInsertId();
-
-        error_log("[$requestId] Push job queued successfully with ID: $jobId");
-
-        return [
-            'status' => 'queued',
-            'APICode' => 'T-0007',
-            'jobId' => $jobId,
-            'queueStatus' => 'queued'
-        ];
-    } catch (PDOException $e) {
-        if (isPushQueueDuplicateError($e)) {
-            $existingJob = null;
-            if (isset($db) && isset($resolved['sourcePath'])) {
-                $existingJob = findPushQueueJobBySourcePath($db, $resolved['sourcePath']);
-            }
-            $existingStatus = $existingJob['status'] ?? 'unknown';
-            $existingJobId = isset($existingJob['id']) ? (int)$existingJob['id'] : null;
-
-            error_log("[$requestId] Duplicate push queue request rejected for source path: " . ($resolved['sourcePath'] ?? 'unknown'));
-
-            return [
-                'status' => 'duplicate',
-                'APICode' => 'T-0008',
-                'message' => 'Duplicate push request for this source path already exists',
-                'jobId' => $existingJobId,
-                'queueStatus' => $existingStatus
-            ];
-        }
-
-        error_log("Unexpected PDO error in process_push_request: " . $e->getMessage());
-        return [
-            'status' => 'error',
-            'APICode' => 'T-0006'
-        ];
-    } catch (Exception $e) {
-        error_log("Unexpected error in process_push_request: " . $e->getMessage());
-        return [
-            'status' => 'error',
-            'APICode' => 'T-0006'
-        ];
-    } finally {
-        error_log(">>> PROCESS_PUSH_REQUEST END (QUEUE MODE) - ID: $requestId");
+function push_new_normalize_destination_path($path) {
+    $normalized = trim((string)$path, '/');
+    if ($normalized === '') {
+        return '/';
     }
+
+    return '/' . str_replace('\\', '/', $normalized);
 }
 
-function validateAndResolvePushRequest($codename, $date, $version, $buildType, $requestId = 'unknown') {
-    $codename = trim((string)$codename);
-    $date = trim((string)$date);
-    $version = trim((string)$version);
+function push_new_get_source_roots() {
+    $roots = [];
+    $candidates = [
+        getenv('BACKBLAZE_SOURCE_ROOT') ?: '',
+        getenv('B2_SOURCE_ROOT') ?: '',
+        getenv('B2_MOUNT_PATH') ?: '',
+        getenv('BACKBLAZE_FETCH_ROOT') ?: '',
+        getenv('PUSH_FETCH_ROOT') ?: '',
+        defined('BACKBLAZE_SOURCE_ROOT') ? (string)BACKBLAZE_SOURCE_ROOT : '',
+        '/mnt/backblaze',
+        '/mnt/b2',
+    ];
+
+    foreach (array_unique(array_filter(array_map('trim', $candidates), static function ($root) {
+        return $root !== '';
+    })) as $root) {
+        $resolved = realpath($root);
+        $root = $resolved !== false ? $resolved : $root;
+        $root = rtrim((string)$root, '/');
+
+        if ($root !== '' && !in_array($root, $roots, true)) {
+            $roots[] = $root;
+        }
+    }
+
+    return $roots;
+}
+
+function push_new_match_build_directory_name($entryName, $buildType, $sourceDate) {
+    $entryName = (string)$entryName;
+    $isVanilla = preg_match('/_Vanilla$/', $entryName) === 1;
+
+    if ($buildType === 'vanilla') {
+        return str_starts_with($entryName, $sourceDate) && $isVanilla;
+    }
+
+    return str_starts_with($entryName, $sourceDate) && !$isVanilla;
+}
+
+function push_new_resolve_source_directory($codename, $version, $sourceDate, $buildType) {
+    $codename = trim((string)$codename, '/');
+    $sourceDate = trim((string)$sourceDate);
     $buildType = strtolower(trim((string)$buildType));
 
-    if ($codename === '' || $date === '' || $version === '' || $buildType === '') {
-        error_log("[$requestId] VALIDATION ERROR: Missing required parameters");
-        return ['success' => false, 'APICode' => 'T-0002'];
-    }
-
-    if (!in_array($buildType, ['vanilla', 'gapps'], true)) {
-        error_log("[$requestId] VALIDATION ERROR: Invalid build type '$buildType'");
-        return ['success' => false, 'APICode' => 'T-0002'];
-    }
-
-    if (!preg_match('/^\d+$/', $version)) {
-        error_log("[$requestId] VALIDATION ERROR: Version contains non-numeric characters '$version'");
-        return ['success' => false, 'APICode' => 'T-0002'];
-    }
-
-    $versionInt = (int)$version;
-    if (!in_array($versionInt, [14, 15, 16, 17], true)) {
-        error_log("[$requestId] VALIDATION ERROR: Invalid version '$version'");
-        return ['success' => false, 'APICode' => 'T-0002'];
-    }
-
-    $dateObj = DateTime::createFromFormat('Y-m-d', $date);
-    if (!$dateObj || $dateObj->format('Y-m-d') !== $date) {
-        error_log("[$requestId] VALIDATION ERROR: Invalid date format '$date'");
-        return ['success' => false, 'APICode' => 'T-0002'];
-    }
-
-    $sourceDate = str_replace('-', '', $date);
-    $sourcePath = resolvePreReleaseSourcePath($codename, $versionInt, $sourceDate, $buildType, $requestId);
-    if ($sourcePath === null) {
-        $available = getAvailablePreReleaseBuildsForDebug($codename, $versionInt); 
-        $availableText = $available !== '' ? ' Available builds: ' . $available : ' No build directories were found under the codename/version path.';
-        error_log("[$requestId] SOURCE ERROR: Directory not found for codename=$codename version=$versionInt buildType=$buildType date=$date$availableText");
-        return ['success' => false, 'APICode' => 'T-0005'];
-    }
-
-    if ($buildType === 'gapps') {
-        $destPath = "/$codename/$versionInt";
-    } else {
-        $destPath = "/$codename/{$versionInt}_vanilla";
-    }
-
-    return [
-        'success' => true,
-        'codename' => $codename,
-        'date' => $date,
-        'version' => (string)$versionInt,
-        'buildType' => $buildType,
-        'sourcePath' => $sourcePath,
-        'destPath' => $destPath
-    ];
-}
-
-function resolvePreReleaseSourcePath($codename, $version, $sourceDate, $buildType, $requestId = 'unknown') {
-    $codename = trim((string)$codename, '/');
-    $versionRoot = PRE_RELEASE_PATH . '/' . $codename . '/' . (string)$version;
-    if (!is_dir($versionRoot)) {
-        error_log("[$requestId] SOURCE ERROR: Version directory missing at $versionRoot");
+    if ($codename === '' || $sourceDate === '' || !in_array($buildType, ['vanilla', 'gapps'], true)) {
         return null;
     }
 
-    $candidates = [];
-    if ($buildType === 'gapps') {
-        $candidates[] = $sourceDate;
-    } else {
-        $candidates[] = $sourceDate . '_Vanilla';
-    }
-
-    foreach ($candidates as $candidate) {
-        $candidatePath = $versionRoot . '/' . $candidate;
-        if (is_dir($candidatePath)) {
-            return $candidatePath;
+    foreach (push_new_get_source_roots() as $root) {
+        $versionRoot = rtrim((string)$root, '/') . '/' . $codename . '/' . (string)$version;
+        if (!is_dir($versionRoot)) {
+            continue;
         }
-    }
 
-    $entries = @scandir($versionRoot);
-    if (is_array($entries)) {
+        $exactCandidates = [$sourceDate];
+        if ($buildType === 'vanilla') {
+            $exactCandidates[] = $sourceDate . '_Vanilla';
+        }
+
+        foreach ($exactCandidates as $candidateName) {
+            $candidatePath = $versionRoot . '/' . $candidateName;
+            if (is_dir($candidatePath) && is_readable($candidatePath)) {
+                return $candidatePath;
+            }
+        }
+
+        $entries = @scandir($versionRoot);
+        if (!is_array($entries)) {
+            continue;
+        }
+
         $matches = [];
         foreach ($entries as $entry) {
             if ($entry === '.' || $entry === '..' || !is_dir($versionRoot . '/' . $entry)) {
                 continue;
             }
 
-            $entryName = (string)$entry;
-            if ($buildType === 'vanilla') {
-                if (strpos($entryName, $sourceDate) === 0 && substr($entryName, -strlen('_Vanilla')) === '_Vanilla') {
-                    $matches[] = $entryName;
-                }
-            } else {
-                if (strpos($entryName, $sourceDate) === 0 && substr($entryName, -strlen('_Vanilla')) !== '_Vanilla') {
-                    $matches[] = $entryName;
-                }
+            if (push_new_match_build_directory_name($entry, $buildType, $sourceDate)) {
+                $matches[] = $versionRoot . '/' . $entry;
             }
         }
 
         if (!empty($matches)) {
             sort($matches, SORT_STRING);
-            return $versionRoot . '/' . $matches[0];
+            return $matches[0];
         }
     }
 
     return null;
 }
 
-function getAvailablePreReleaseBuildsForDebug($codename, $version) {
-    $versionRoot = PRE_RELEASE_PATH . '/' . trim((string)$codename, '/') . '/' . (string)$version;
-    if (!is_dir($versionRoot)) {
-        return '';
+function push_new_copy_directory_tree($sourceDir, $targetDir) {
+    if (!is_dir($sourceDir) || !is_readable($sourceDir)) {
+        return false;
     }
 
-    $entries = @scandir($versionRoot);
-    if (!is_array($entries)) {
-        return '';
+    if (!is_dir($targetDir) && !@mkdir($targetDir, 0755, true) && !is_dir($targetDir)) {
+        return false;
     }
 
-    $names = [];
-    foreach ($entries as $entry) {
-        if ($entry === '.' || $entry === '..' || !is_dir($versionRoot . '/' . $entry)) {
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($sourceDir, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+
+    foreach ($iterator as $item) {
+        $relativePath = ltrim(str_replace($sourceDir, '', $item->getPathname()), '/');
+        $targetPath = $relativePath === '' ? $targetDir : $targetDir . '/' . $relativePath;
+
+        if ($item->isDir()) {
+            if (!is_dir($targetPath) && !@mkdir($targetPath, 0755, true) && !is_dir($targetPath)) {
+                return false;
+            }
             continue;
         }
-        $names[] = $entry;
+
+        $parentDir = dirname($targetPath);
+        if (!is_dir($parentDir) && !@mkdir($parentDir, 0755, true) && !is_dir($parentDir)) {
+            return false;
+        }
+
+        if (!copy($item->getPathname(), $targetPath)) {
+            return false;
+        }
     }
 
-    sort($names, SORT_STRING);
-    return implode(', ', array_slice($names, 0, 20));
+    return true;
 }
 
-function isPushSourcePathAccessible($sourcePath, $requestId = 'unknown') {
-    clearstatcache(true, $sourcePath);
-
-    $pathExists = is_dir($sourcePath);
-    if ($pathExists) {
-        return true;
+function push_new_verify_staged_directory($directory) {
+    if (!is_dir($directory) || !is_readable($directory)) {
+        return false;
     }
 
-    $resolved = realpath($sourcePath);
-    if ($resolved !== false && is_dir($resolved)) {
-        return true;
+    $fileCount = 0;
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($directory, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+
+    foreach ($iterator as $item) {
+        if ($item->isFile()) {
+            $fileCount++;
+        }
     }
 
-    $contents = @scandir($sourcePath);
-    if ($contents !== false) {
-        error_log("[$requestId] Source directory accessible via scandir despite is_dir=false: $sourcePath");
-        return true;
-    }
-
-    error_log("[$requestId] SOURCE ERROR: Directory not found at $sourcePath");
-    return false;
+    return $fileCount > 0;
 }
 
-function processNextQueuedPushReleaseJob() {
-    $lockPath = sys_get_temp_dir() . '/php_filebrowser_push_queue.lock';
-    $lockHandle = fopen($lockPath, 'c');
+function push_new_staging_root() {
+    $root = defined('PUSH_STAGING_ROOT') && trim((string)PUSH_STAGING_ROOT) !== ''
+        ? trim((string)PUSH_STAGING_ROOT)
+        : __DIR__ . '/../../data/cache/tmp_push';
 
-    if ($lockHandle === false) {
-        return [
-            'success' => false,
-            'status' => 'lock_error',
-            'message' => 'Unable to create worker lock file'
-        ];
+    if (!is_dir($root) && !@mkdir($root, 0755, true) && !is_dir($root)) {
+        return null;
     }
 
-    if (!flock($lockHandle, LOCK_EX | LOCK_NB)) {
-        fclose($lockHandle);
-        return [
-            'success' => true,
-            'status' => 'worker_busy',
-            'message' => 'Push queue worker already running'
-        ];
-    }
-
-    try {
-        $db = Database::getInstance()->getConnection();
-
-        $processingStmt = $db->query("SELECT id FROM push_release_queue WHERE status = 'processing' ORDER BY started_at ASC, id ASC LIMIT 1");
-        $processingJob = $processingStmt->fetch();
-
-        if ($processingJob) {
-            return [
-                'success' => true,
-                'status' => 'already_processing',
-                'jobId' => (int)$processingJob['id'],
-                'message' => 'A push job is already processing'
-            ];
-        }
-
-        $queuedStmt = $db->query("SELECT id FROM push_release_queue WHERE status = 'queued' ORDER BY id ASC LIMIT 1");
-        $queuedJob = $queuedStmt->fetch();
-
-        if (!$queuedJob) {
-            return [
-                'success' => true,
-                'status' => 'idle',
-                'message' => 'No queued push jobs'
-            ];
-        }
-
-        $jobId = (int)$queuedJob['id'];
-        if (!markPushQueueJobAsProcessing($db, $jobId)) {
-            return [
-                'success' => true,
-                'status' => 'race_lost',
-                'message' => 'Queued job was claimed by another worker'
-            ];
-        }
-
-        $job = getPushQueueJobById($db, $jobId);
-        if (!$job) {
-            return [
-                'success' => false,
-                'status' => 'missing_job',
-                'message' => 'Failed to load claimed queue job'
-            ];
-        }
-
-        try {
-            $runResult = executeQueuedPushReleaseJob($job);
-        } catch (Throwable $e) {
-            $runResult = [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
-            error_log('[push-worker] Unhandled exception while processing job #' . $jobId . ': ' . $e->getMessage());
-        }
-
-        completePushQueueJob($db, $jobId, $runResult['success'], $runResult['error'] ?? null);
-
-        $updatedJob = getPushQueueJobById($db, $jobId) ?: $job;
-
-        try {
-            $callbackResult = triggerPushCompletionCallback($db, $updatedJob, $runResult);
-        } catch (Throwable $e) {
-            $callbackResult = [
-                'sent' => false,
-                'error' => $e->getMessage()
-            ];
-            error_log('[push-worker] Completion callback failed for job #' . $jobId . ': ' . $e->getMessage());
-        }
-
-        try {
-            $discordWebhookResult = triggerPushFailureDiscordWebhook($updatedJob, $runResult);
-        } catch (Throwable $e) {
-            $discordWebhookResult = [
-                'sent' => false,
-                'error' => $e->getMessage()
-            ];
-            error_log('[push-worker] Discord failure webhook failed for job #' . $jobId . ': ' . $e->getMessage());
-        }
-
-        try {
-            $successDiscordWebhookResult = triggerPushSuccessDiscordWebhook($updatedJob, $runResult);
-        } catch (Throwable $e) {
-            $successDiscordWebhookResult = [
-                'sent' => false,
-                'error' => $e->getMessage()
-            ];
-            error_log('[push-worker] Discord success webhook failed for job #' . $jobId . ': ' . $e->getMessage());
-        }
-
-        return [
-            'success' => true,
-            'status' => $runResult['success'] ? 'processed' : 'failed',
-            'jobId' => $jobId,
-            'jobSuccess' => (bool)$runResult['success'],
-            'message' => $runResult['success'] ? 'Push job completed' : 'Push job failed',
-            'callback' => $callbackResult,
-            'discordWebhook' => $discordWebhookResult,
-            'successDiscordWebhook' => $successDiscordWebhookResult
-        ];
-    } catch (Exception $e) {
-        error_log('Push queue worker error: ' . $e->getMessage());
-        return [
-            'success' => false,
-            'status' => 'error',
-            'message' => $e->getMessage()
-        ];
-    } finally {
-        flock($lockHandle, LOCK_UN);
-        fclose($lockHandle);
-    }
+    return rtrim($root, '/');
 }
 
-function markPushQueueJobAsProcessing($db, $jobId) {
-    $nowExpr = getDatabaseNowExpression();
-    $stmt = $db->prepare("\n        UPDATE push_release_queue\n        SET status = 'processing', started_at = $nowExpr, updated_at = $nowExpr\n        WHERE id = ? AND status = 'queued'\n    ");
-    $stmt->execute([$jobId]);
-    return $stmt->rowCount() === 1;
-}
-
-function completePushQueueJob($db, $jobId, $success, $errorMessage = null) {
-    $nowExpr = getDatabaseNowExpression();
-    $finalStatus = $success ? 'completed' : 'failed';
-    $stmt = $db->prepare("\n        UPDATE push_release_queue\n        SET status = '$finalStatus', success = ?, error_message = ?, completed_at = $nowExpr, updated_at = $nowExpr\n        WHERE id = ?\n    ");
-    $stmt->execute([$success ? 1 : 0, $errorMessage, $jobId]);
-}
-
-function getPushQueueJobById($db, $jobId) {
-    $stmt = $db->prepare('SELECT * FROM push_release_queue WHERE id = ? LIMIT 1');
-    $stmt->execute([$jobId]);
-    return $stmt->fetch();
-}
-
-function logPushWorkerProgress($jobId, $message) {
-    error_log("[push-worker] Job #$jobId $message");
-}
-
-function executeQueuedPushReleaseJob($job) {
-    $jobId = (int)$job['id'];
-    $sourcePath = $job['source_path'];
-    $destPath = normalizePushDestinationPath((string)$job['destination_path']);
-    $codename = trim((string)($job['codename'] ?? 'unknown'));
-
-    logPushWorkerProgress($jobId, "starting from $sourcePath to $destPath");
-
-    if (!isPushSourcePathAccessible($sourcePath, 'job_' . $jobId)) {
-        $message = "Source directory not found: $sourcePath";
-        logPushWorkerProgress($jobId, $message);
-        return [
-            'success' => false,
-            'error' => $message
-        ];
+function push_new_stage_source_to_tmp($sourcePath, $codename, $version, $buildType, $sourceDate) {
+    $stagingRoot = push_new_staging_root();
+    if ($stagingRoot === null) {
+        return null;
     }
 
-    logPushWorkerProgress($jobId, 'clearing destination hashes');
-    clearHashesForPath($destPath);
+    $targetDir = $stagingRoot . '/' . trim((string)$codename, '/') . '/' . (string)$version . '/' . strtolower((string)$buildType) . '/' . $sourceDate;
 
-    logPushWorkerProgress($jobId, 'beginning Bunny upload');
-    $copyResult = uploadDirectoryToBunny($sourcePath, $destPath, $jobId, $codename);
-    if (!$copyResult) {
-        $message = "Background processing failed during Bunny upload for job #$jobId";
-        logPushWorkerProgress($jobId, $message);
-        return [
-            'success' => false,
-            'error' => $message
-        ];
-    }
-
-    logPushWorkerProgress($jobId, 'upload finished, waiting 30 seconds before bucket verification');
-    sleep(30);
-
-    logPushWorkerProgress($jobId, 'verifying uploaded files');
-    if (!verifyBunnyUploadIntegrity($sourcePath, $destPath, $jobId, $codename)) {
-        $message = "Background processing failed Bunny upload verification for job #$jobId";
-        logPushWorkerProgress($jobId, $message);
-        return [
-            'success' => false,
-            'error' => $message
-        ];
-    }
-
-    logPushWorkerProgress($jobId, 'removing source directory');
-    $cleanupResult = removeDirectoryRecursively($sourcePath);
-    if (!$cleanupResult['success']) {
-        $cleanupMessage = "Push completed but failed to remove pre-release source directory for job #$jobId: $sourcePath";
-
-        if (!empty($cleanupResult['errors'])) {
-            $cleanupMessage .= ' | errors: ' . implode(' | ', array_slice($cleanupResult['errors'], 0, 5));
-        }
-
-        logPushWorkerProgress($jobId, $cleanupMessage);
-
-        if (shouldFailPushOnCleanupError()) {
-            return [
-                'success' => false,
-                'error' => $cleanupMessage
-            ];
+    if (is_dir($targetDir)) {
+        $deleteResult = removeDirectoryRecursively($targetDir);
+        if (!$deleteResult['success']) {
+            push_new_log('Failed to reset staging dir: ' . $targetDir);
+            return null;
         }
     }
 
-    logPushWorkerProgress($jobId, 'invalidating cache');
-    $cache = new BucketCache();
-    $cache->invalidateCache();
-    invalidateBunnyListingCachesForPath($destPath);
-
-    logPushWorkerProgress($jobId, 'completed successfully and cache invalidated');
-
-    $result = [
-        'success' => true,
-        'error' => null
-    ];
-
-    if (!$cleanupResult['success']) {
-        $result['warning'] = 'Pre-release cleanup failed; source files may require manual removal';
+    if (!push_new_copy_directory_tree($sourcePath, $targetDir)) {
+        push_new_log('Failed to stage source: ' . $sourcePath . ' -> ' . $targetDir);
+        return null;
     }
 
-    return $result;
+    if (!push_new_verify_staged_directory($targetDir)) {
+        push_new_log('Staged directory verification failed: ' . $targetDir);
+        return null;
+    }
+
+    return $targetDir;
 }
 
-function uploadDirectoryToBunny($source, $destPath, $jobId = null, $codename = null) {
-    if (!is_dir($source)) {
+function push_new_upload_directory_to_bunny($sourceDir, $destinationPath) {
+    if (!is_dir($sourceDir)) {
         return false;
     }
 
     $client = bunny_get_storage_client();
-    $destPrefix = trim(normalizePushDestinationPath((string)$destPath), '/');
+    $targetPrefix = trim(push_new_normalize_destination_path($destinationPath), '/');
 
-    $filesToProcess = [];
     $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS),
+        new RecursiveDirectoryIterator($sourceDir, RecursiveDirectoryIterator::SKIP_DOTS),
         RecursiveIteratorIterator::SELF_FIRST
     );
 
@@ -763,611 +294,27 @@ function uploadDirectoryToBunny($source, $destPath, $jobId = null, $codename = n
         }
 
         $relativePath = str_replace('\\', '/', $iterator->getSubPathName());
-        $remotePath = $destPrefix === '' ? $relativePath : ($destPrefix . '/' . $relativePath);
-
-        $filesToProcess[] = [
-            'relativePath' => $relativePath,
-            'sourcePath' => $item->getPathname(),
-            'remotePath' => $remotePath,
-        ];
-    }
-
-    if ($jobId !== null) {
-        logPushWorkerProgress($jobId, 'Uploading [' . count($filesToProcess) . '] files to Bunny storage');
-    }
-
-    foreach ($filesToProcess as $file) {
-        if ($jobId !== null) {
-            $displayName = ($codename ?: 'unknown') . ' - ' . $file['relativePath'];
-            logPushWorkerProgress($jobId, '- ' . $displayName . ' (uploading)');
-        }
+        $remotePath = $targetPrefix === '' ? $relativePath : ($targetPrefix . '/' . $relativePath);
 
         try {
-            $client->upload($file['sourcePath'], $file['remotePath']);
+            $client->upload($item->getPathname(), $remotePath);
         } catch (Throwable $e) {
-            if ($jobId !== null) {
-                logPushWorkerProgress($jobId, 'Upload failed for ' . $file['relativePath'] . ': ' . $e->getMessage());
-            }
+            push_new_log('Bunny upload failed for ' . $item->getPathname() . ': ' . $e->getMessage());
             return false;
-        }
-
-        if ($jobId !== null) {
-            $displayName = ($codename ?: 'unknown') . ' - ' . $file['relativePath'];
-            logPushWorkerProgress($jobId, '- ' . $displayName . ' (completed)');
         }
     }
 
     return true;
 }
 
-function verifyBunnyUploadIntegrity($source, $destPath, $jobId = null, $codename = null) {
-    if (!is_dir($source)) {
+function push_new_verify_bunny_upload($sourceDir, $destinationPath) {
+    if (!is_dir($sourceDir)) {
         return false;
     }
 
-    $client = bunny_get_storage_client();
-    $destPrefix = trim(normalizePushDestinationPath((string)$destPath), '/');
-
-    $sourceIterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS)
-    );
-
-    $verifiedFiles = 0;
-
-    foreach ($sourceIterator as $item) {
-        if (!$item->isFile()) {
-            continue;
-        }
-
-        $relativePath = str_replace('\\', '/', $sourceIterator->getSubPathName());
-        $remotePath = $destPrefix === '' ? $relativePath : ($destPrefix . '/' . $relativePath);
-
-        try {
-            $rawInfo = bunny_describe_file_raw($remotePath);
-            $remoteSize = (int)($rawInfo['length'] ?? 0);
-        } catch (Throwable $rawException) {
-            if ($jobId !== null) {
-                logPushWorkerProgress($jobId, 'Verification failed for ' . $relativePath . ': ' . $rawException->getMessage());
-            }
-            return false;
-        }
-
-        if ((int)$item->getSize() !== $remoteSize) {
-            if ($jobId !== null) {
-                logPushWorkerProgress($jobId, 'Size mismatch for ' . $relativePath . ' local=' . (int)$item->getSize() . ' remote=' . $remoteSize);
-            }
-            return false;
-        }
-
-        $verifiedFiles++;
-        if ($jobId !== null && $verifiedFiles % 50 === 0) {
-            logPushWorkerProgress($jobId, 'verification progress: checked ' . $verifiedFiles . ' Bunny files');
-        }
-    }
-
-    if ($jobId !== null) {
-        logPushWorkerProgress($jobId, 'verification progress: checked ' . $verifiedFiles . ' Bunny files total');
-    }
-
-    return true;
-}
-
-function invalidateBunnyListingCachesForPath($path) {
-    try {
-        $cache = CacheManager::getInstance();
-        $normalized = bunny_normalize_relative_path(normalizePushDestinationPath((string)$path));
-
-        $paths = ['/'];
-        if ($normalized !== '/') {
-            $segments = explode('/', trim($normalized, '/'));
-            $current = '';
-            foreach ($segments as $segment) {
-                $current .= '/' . $segment;
-                $paths[] = $current;
-            }
-        }
-
-        foreach (array_unique($paths) as $cachePath) {
-            $cache->delete('bunny_listing:' . md5($cachePath));
-        }
-    } catch (Throwable $e) {
-        error_log('Failed to invalidate Bunny listing cache for path ' . $path . ': ' . $e->getMessage());
-    }
-}
-
-function normalizePushDestinationPath($path) {
-    $path = trim((string)$path);
-
-    if ($path === '') {
-        return '/';
-    }
-
-    if (strpos($path, BASE_PATH) === 0) {
-        $path = '/' . ltrim(str_replace(BASE_PATH, '', $path), '/');
-    }
-
-    return bunny_normalize_relative_path($path);
-}
-
-function shouldFailPushOnCleanupError() {
-    $raw = getenv('PUSH_FAIL_ON_CLEANUP_ERROR');
-    if ($raw === false || trim((string)$raw) === '') {
-        return false;
-    }
-
-    return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
-}
-
-function triggerPushCompletionCallback($db, $job, $runResult) {
-    $enabled = isset($job['callback_enabled']) && (int)$job['callback_enabled'] === 1;
-    $url = trim((string)($job['callback_url'] ?? ''));
-
-    if (!$enabled || $url === '') {
-        return [
-            'sent' => false,
-            'skipped' => true,
-            'reason' => 'Callback disabled or URL missing'
-        ];
-    }
-
-    $responseBody = '';
-    $httpCode = 0;
-    $error = null;
-
-    if (function_exists('curl_init')) {
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 20);
-
-        $response = curl_exec($ch);
-        if ($response === false) {
-            $error = curl_error($ch);
-        } else {
-            $responseBody = (string)$response;
-        }
-
-        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-    } else {
-        $context = stream_context_create([
-            'http' => [
-                'method' => 'GET',
-                'timeout' => 20
-            ]
-        ]);
-
-        $response = @file_get_contents($url, false, $context);
-        if ($response === false) {
-            $error = 'HTTP callback failed (curl extension unavailable)';
-        } else {
-            $responseBody = (string)$response;
-        }
-
-        if (isset($http_response_header) && is_array($http_response_header)) {
-            foreach ($http_response_header as $headerLine) {
-                if (preg_match('/HTTP\/\d\.\d\s+(\d{3})/', $headerLine, $matches)) {
-                    $httpCode = (int)$matches[1];
-                    break;
-                }
-            }
-        }
-    }
-
-    if ($error !== null && $responseBody === '') {
-        $responseBody = $error;
-    }
-
-    $stmt = $db->prepare('UPDATE push_release_queue SET callback_http_code = ?, callback_response = ? WHERE id = ?');
-    $stmt->execute([$httpCode, substr($responseBody, 0, 2000), (int)$job['id']]);
-
-    return [
-        'sent' => $error === null,
-        'httpCode' => $httpCode,
-        'error' => $error,
-        'jobSuccess' => (bool)$runResult['success']
-    ];
-}
-
-function triggerPushSuccessDiscordWebhook($job, $runResult) {
-    if (empty($runResult['success'])) {
-        return [
-            'sent' => false,
-            'skipped' => true,
-            'reason' => 'Job failed or not successful'
-        ];
-    }
-
-    $config = getPushSuccessDiscordWebhookConfig();
-    if (!$config['enabled']) {
-        return [
-            'sent' => false,
-            'skipped' => true,
-            'reason' => 'Discord success webhook disabled or URL missing'
-        ];
-    }
-
-    $jobId = (int)($job['id'] ?? 0);
-    $codename = $job['codename'] ?? 'unknown';
-    $version = $job['version'] ?? 'unknown';
-    $releaseDate = $job['release_date'] ?? 'unknown';
-    $buildType = $job['build_type'] ?? 'unknown';
-
-    $payload = [
-        'username' => $config['username'],
-        'content' => '',
-        'embeds' => [[
-            'title' => 'CDN Push Release - Success',
-            'description' => "Device: `{$codename}`\nVersion: `{$version}`\nBuild Date: `{$releaseDate}`\nType: `{$buildType}`\n\nOTA merge can now be completed.",
-            'color' => 5763719,
-        ]],
-        'allowed_mentions' => [
-            'parse' => ['users']
-        ]
-    ];
-
-    if ($config['avatarUrl'] !== '') {
-        $payload['avatar_url'] = $config['avatarUrl'];
-    }
-
-    $result = sendJsonWebhookRequest($config['url'], $payload);
-    error_log('[push-worker] Discord success webhook result for job #' . $jobId . ': ' . json_encode($result));
-
-    return $result;
-}
-
-function triggerPushFailureDiscordWebhook($job, $runResult) {
-    if (!empty($runResult['success'])) {
-        return [
-            'sent' => false,
-            'skipped' => true,
-            'reason' => 'Job succeeded'
-        ];
-    }
-
-    $config = getPushFailureDiscordWebhookConfig();
-    if (!$config['enabled']) {
-        return [
-            'sent' => false,
-            'skipped' => true,
-            'reason' => 'Discord failure webhook disabled or URL missing'
-        ];
-    }
-
-    $jobId = (int)($job['id'] ?? 0);
-    $codename = $job['codename'] ?? 'unknown';
-    $version = $job['version'] ?? 'unknown';
-    $releaseDate = $job['release_date'] ?? 'unknown';
-    $buildType = $job['build_type'] ?? 'unknown';
-    $errorMessage = trim((string)($runResult['error'] ?? $job['error_message'] ?? 'Unknown push failure'));
-
-    $payload = [
-        'username' => $config['username'],
-        'content' => '',
-        'embeds' => [[
-            'title' => 'CDN Push Release - Failed',
-            'description' => "Device: `{$codename}`\nVersion: `{$version}`\nBuild Date: `{$releaseDate}`\nType: `{$buildType}`\n\nError: `{$errorMessage}`",
-            'color' => 15548997,
-            'footer' => [
-                'text' => 'Job #' . $jobId,
-            ],
-        ]],
-        'allowed_mentions' => [
-            'parse' => ['users']
-        ]
-    ];
-
-    if ($config['avatarUrl'] !== '') {
-        $payload['avatar_url'] = $config['avatarUrl'];
-    }
-
-    $embedResult = sendJsonWebhookRequest($config['url'], $payload);
-
-    $mentionPayload = [
-        'username' => $config['username'],
-        'content' => '<@180736511354863627> Please investigate ASAP',
-        'allowed_mentions' => [
-            'parse' => ['users']
-        ]
-    ];
-
-    if ($config['avatarUrl'] !== '') {
-        $mentionPayload['avatar_url'] = $config['avatarUrl'];
-    }
-
-    $mentionResult = sendJsonWebhookRequest($config['url'], $mentionPayload);
-
-    $result = [
-        'sent' => ($embedResult['sent'] ?? false) && ($mentionResult['sent'] ?? false),
-        'httpCode' => $embedResult['httpCode'] ?? 0,
-        'error' => ($embedResult['error'] ?? null) ?: ($mentionResult['error'] ?? null),
-        'embed' => $embedResult,
-        'mention' => $mentionResult,
-    ];
-    error_log('[push-worker] Discord failure webhook result for job #' . $jobId . ': ' . json_encode($result));
-
-    return $result;
-}
-
-function sendJsonWebhookRequest($url, $payload) {
-    $responseBody = '';
-    $httpCode = 0;
-    $error = null;
-    $body = json_encode($payload);
-
-    if ($body === false) {
-        return [
-            'sent' => false,
-            'httpCode' => 0,
-            'error' => 'Failed to encode webhook payload'
-        ];
-    }
-
-    if (function_exists('curl_init')) {
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Content-Type: application/json',
-            'Content-Length: ' . strlen($body)
-        ]);
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 20);
-
-        $response = curl_exec($ch);
-        if ($response === false) {
-            $error = curl_error($ch);
-        } else {
-            $responseBody = (string)$response;
-        }
-
-        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-    } else {
-        $context = stream_context_create([
-            'http' => [
-                'method' => 'POST',
-                'header' => "Content-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\n",
-                'content' => $body,
-                'timeout' => 20,
-                'ignore_errors' => true
-            ]
-        ]);
-
-        $response = @file_get_contents($url, false, $context);
-        if ($response === false) {
-            $error = 'HTTP webhook failed (curl extension unavailable)';
-        } else {
-            $responseBody = (string)$response;
-        }
-
-        if (isset($http_response_header) && is_array($http_response_header)) {
-            foreach ($http_response_header as $headerLine) {
-                if (preg_match('/HTTP\/\d\.\d\s+(\d{3})/', $headerLine, $matches)) {
-                    $httpCode = (int)$matches[1];
-                    break;
-                }
-            }
-        }
-    }
-
-    if ($error === null && ($httpCode < 200 || $httpCode >= 300)) {
-        $error = 'Webhook returned HTTP ' . $httpCode;
-    }
-
-    return [
-        'sent' => $error === null,
-        'httpCode' => $httpCode,
-        'error' => $error,
-        'response' => substr($responseBody, 0, 1000)
-    ];
-}
-
-function getPushCompletionCallbackConfig() {
-    $sendUpdateRaw = getenv('PUSH_SEND_UPDATE');
-    $sendUpdate = false;
-
-    if ($sendUpdateRaw !== false) {
-        $sendUpdate = filter_var($sendUpdateRaw, FILTER_VALIDATE_BOOLEAN);
-    }
-
-    $url = trim((string)(getenv('PUSH_UPDATE_URL') ?: getenv('PUSH_READY_CALLBACK_URL') ?: ''));
-
-    return [
-        'enabled' => $sendUpdate && $url !== '',
-        'url' => $url
-    ];
-}
-
-function getPushSuccessDiscordWebhookConfig() {
-    $url = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_URL') ?: ''));
-    $username = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_USERNAME') ?: 'Evolution X CDN'));
-    $avatarUrl = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_AVATAR_URL') ?: ''));
-
-    return [
-        'enabled' => $url !== '',
-        'url' => $url,
-        'username' => $username,
-        'avatarUrl' => $avatarUrl
-    ];
-}
-
-function getPushFailureDiscordWebhookConfig() {
-    $url = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_URL') ?: ''));
-    $username = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_USERNAME') ?: 'Evolution X CDN'));
-    $avatarUrl = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_AVATAR_URL') ?: ''));
-
-    return [
-        'enabled' => $url !== '',
-        'url' => $url,
-        'username' => $username,
-        'avatarUrl' => $avatarUrl
-    ];
-}
-
-function getDatabaseNowExpression() {
-    return (defined('DB_TYPE') && DB_TYPE === 'mysql') ? 'NOW()' : 'CURRENT_TIMESTAMP';
-}
-
-function normalizePushJobRow($job) {
-    return [
-        'id' => isset($job['id']) ? (int)$job['id'] : null,
-        'codename' => $job['codename'] ?? null,
-        'date' => $job['release_date'] ?? null,
-        'version' => $job['version'] ?? null,
-        'buildType' => $job['build_type'] ?? null,
-        'requestedBy' => $job['requested_by'] ?? null,
-        'sourcePath' => $job['source_path'] ?? null,
-        'destinationPath' => $job['destination_path'] ?? null,
-        'status' => $job['status'] ?? null,
-        'success' => isset($job['success']) ? (bool)$job['success'] : null,
-        'errorMessage' => $job['error_message'] ?? null,
-        'callbackEnabled' => isset($job['callback_enabled']) ? ((int)$job['callback_enabled'] === 1) : false,
-        'callbackUrl' => $job['callback_url'] ?? null,
-        'callbackHttpCode' => isset($job['callback_http_code']) ? (int)$job['callback_http_code'] : null,
-        'callbackResponse' => $job['callback_response'] ?? null,
-        'createdAt' => $job['created_at'] ?? null,
-        'startedAt' => $job['started_at'] ?? null,
-        'completedAt' => $job['completed_at'] ?? null,
-        'updatedAt' => $job['updated_at'] ?? null
-    ];
-}
-
-function isPushQueueDuplicateError(PDOException $e) {
-    // MySQL duplicate key (23000/1062) and SQLite unique constraint violation (23000/19).
-    $errorInfo = $e->errorInfo ?? [];
-    $sqlState = $errorInfo[0] ?? $e->getCode();
-    $driverCode = isset($errorInfo[1]) ? (int)$errorInfo[1] : 0;
-    $message = strtolower($e->getMessage());
-
-    if ((string)$sqlState === '23000' && ($driverCode === 1062 || $driverCode === 19)) {
-        return true;
-    }
-
-    return strpos($message, 'duplicate') !== false || strpos($message, 'unique constraint') !== false;
-}
-
-function findPushQueueJobBySourcePath($db, $sourcePath) {
-    $stmt = $db->prepare('SELECT id, status FROM push_release_queue WHERE source_path = ? ORDER BY id DESC LIMIT 1');
-    $stmt->execute([$sourcePath]);
-    return $stmt->fetch() ?: null;
-}
-
-function queuePushReleaseFromDirectory($releaseDirectory, $requestedBy = 'watcher') {
-    $normalizedDirectory = rtrim((string)$releaseDirectory, '/');
-    if ($normalizedDirectory === '') {
-        return [
-            'status' => 'error',
-            'message' => 'Release directory is required'
-        ];
-    }
-
-    $realDirectory = realpath($normalizedDirectory);
-    if ($realDirectory === false || !is_dir($realDirectory)) {
-        return [
-            'status' => 'error',
-            'message' => 'Release directory not found: ' . $normalizedDirectory
-        ];
-    }
-
-    try {
-        $db = Database::getInstance()->getConnection();
-        $existingJob = findPushQueueJobBySourcePath($db, $realDirectory);
-        if (is_array($existingJob)) {
-            return [
-                'status' => 'queued',
-                'jobId' => (int)($existingJob['id'] ?? 0),
-                'existing' => true,
-                'sourcePath' => $realDirectory,
-            ];
-        }
-    } catch (Throwable $e) {
-        return [
-            'status' => 'error',
-            'message' => 'Failed to check existing queue entry: ' . $e->getMessage(),
-        ];
-    }
-
-    $zipFiles = glob($realDirectory . '/*.zip');
-    if (!$zipFiles || !is_array($zipFiles)) {
-        return [
-            'status' => 'error',
-            'message' => 'No release zip found in ' . $realDirectory
-        ];
-    }
-
-    usort($zipFiles, function($a, $b) {
-        return filemtime($b) <=> filemtime($a);
-    });
-
-    $zipFile = $zipFiles[0];
-    $metadata = parsePushReleaseMetadataFromFilename(basename($zipFile), $realDirectory);
-    if ($metadata === null) {
-        return [
-            'status' => 'error',
-            'message' => 'Unable to parse release metadata from ' . basename($zipFile)
-        ];
-    }
-
-    return processPushRequest(
-        $metadata['codename'],
-        $metadata['date'],
-        $metadata['version'],
-        $metadata['buildType'],
-        $requestedBy
-    );
-}
-
-function parsePushReleaseMetadataFromFilename($filename, $releaseDirectory = '') {
-    $filename = basename((string)$filename);
-    $releaseDirectory = rtrim((string)$releaseDirectory, '/');
-
-    if (!preg_match('/^EvolutionX-(\d+)\.(\d+)-([0-9]{8})-([A-Za-z0-9._-]+)-([A-Za-z0-9._-]+)-(Vanilla-)?Official\.zip$/i', $filename, $matches)) {
-        return null;
-    }
-
-    $version = (string)(int)$matches[1];
-    $dateRaw = (string)$matches[3];
-    $codename = trim((string)$matches[4]);
-    $buildType = !empty($matches[6]) ? 'vanilla' : 'gapps';
-
-    if ($releaseDirectory !== '' && preg_match('/\/([A-Za-z0-9._-]+)\/(\d{8})(?:_Vanilla)?$/', $releaseDirectory, $dirMatches)) {
-        $codename = $dirMatches[1];
-        $dateRaw = $dirMatches[2];
-        if (str_ends_with($releaseDirectory, '_Vanilla')) {
-            $buildType = 'vanilla';
-        }
-    }
-
-    $date = DateTime::createFromFormat('Ymd', $dateRaw);
-    if (!$date) {
-        return null;
-    }
-
-    return [
-        'codename' => $codename,
-        'date' => $date->format('Y-m-d'),
-        'version' => $version,
-        'buildType' => $buildType,
-    ];
-}
-
-function copyRecursively($source, $dest, $jobId = null) {
-    if (!is_dir($source)) {
-        return false;
-    }
-
-    if (!is_dir($dest)) {
-        if (!mkdir($dest, 0755, true) && !is_dir($dest)) {
-            return false;
-        }
-    }
-
-    $filesToProcess = [];
+    $targetPrefix = trim(push_new_normalize_destination_path($destinationPath), '/');
     $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS),
+        new RecursiveDirectoryIterator($sourceDir, RecursiveDirectoryIterator::SKIP_DOTS),
         RecursiveIteratorIterator::SELF_FIRST
     );
 
@@ -1376,215 +323,805 @@ function copyRecursively($source, $dest, $jobId = null) {
             continue;
         }
 
-        $relativePath = $iterator->getSubPathName();
-        $filesToProcess[] = [
-            'relativePath' => $relativePath,
-            'sourcePath' => $item->getPathname(),
-            'destPath' => $dest . DIRECTORY_SEPARATOR . $relativePath,
+        $relativePath = str_replace('\\', '/', $iterator->getSubPathName());
+        $remotePath = $targetPrefix === '' ? $relativePath : ($targetPrefix . '/' . $relativePath);
+        $localSize = filesize($item->getPathname());
+
+        try {
+            $meta = bunny_describe_file_raw($remotePath);
+            $remoteSize = (int)($meta['length'] ?? 0);
+        } catch (Throwable $e) {
+            push_new_log('Bunny describe failed for ' . $remotePath . ': ' . $e->getMessage());
+            return false;
+        }
+
+        if ($localSize !== $remoteSize) {
+            push_new_log('Upload verification mismatch for ' . $remotePath . ': local=' . $localSize . ' remote=' . $remoteSize);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function push_new_post_webhook_update($webhookUrl, array $payload) {
+    if ($webhookUrl === '' || $webhookUrl === null) {
+        return true;
+    }
+
+    $ch = curl_init((string)$webhookUrl);
+    if ($ch === false) {
+        return false;
+    }
+
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $json,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Content-Length: ' . strlen($json),
+        ],
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_CONNECTTIMEOUT => 10,
+    ]);
+
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false || $httpCode >= 400 || $curlErr !== '') {
+        push_new_log('Webhook update failed: ' . $curlErr . ' HTTP=' . (string)$httpCode);
+        return false;
+    }
+
+    return true;
+}
+
+function push_new_parse_request($rawInput, $pathParts = []) {
+    if (!empty($pathParts) && count($pathParts) >= 4) {
+        return [
+            'success' => true,
+            'payload' => [
+                'codename' => (string)$pathParts[0],
+                'date' => (string)$pathParts[1],
+                'version' => (string)$pathParts[2],
+                'buildType' => strtolower((string)$pathParts[3]),
+            ],
         ];
     }
 
-    $fileCount = count($filesToProcess);
-    if ($jobId !== null) {
-        logPushWorkerProgress($jobId, "Processing [$fileCount] files:");
-    }
-
-    foreach ($filesToProcess as $file) {
-        $relativePath = $file['relativePath'];
-        $sourcePath = $file['sourcePath'];
-        $destPath = $file['destPath'];
-        $destDir = dirname($destPath);
-
-        if (!is_dir($destDir)) {
-            if (!mkdir($destDir, 0755, true) && !is_dir($destDir)) {
-                return false;
-            }
-        }
-
-        if ($jobId !== null) {
-            $displayName = $codename . ' - ' . $relativePath;
-            logPushWorkerProgress($jobId, "- $displayName (copying 0%)");
-        }
-
-        if (!copyFileWithProgress($sourcePath, $destPath, $jobId, $relativePath)) {
-            return false;
-        }
-
-        if ($jobId !== null) {
-            $displayName = $codename . ' - ' . $relativePath;
-            logPushWorkerProgress($jobId, "- $displayName (completed)");
-        }
-    }
-
-    return true;
-}
-
-function copyFileWithProgress($sourcePath, $destPath, $jobId = null, $relativePath = null) {
-    $sourceHandle = fopen($sourcePath, 'rb');
-    if ($sourceHandle === false) {
-        return false;
-    }
-
-    $destHandle = fopen($destPath, 'wb');
-    if ($destHandle === false) {
-        fclose($sourceHandle);
-        return false;
-    }
-
-    $totalBytes = @filesize($sourcePath);
-    $totalBytes = $totalBytes !== false ? (int)$totalBytes : 0;
-    $bytesCopied = 0;
-    $lastLoggedPercent = -1;
-    $bufferSize = 1024 * 1024;
-
-    while (!feof($sourceHandle)) {
-        $chunk = fread($sourceHandle, $bufferSize);
-        if ($chunk === false || $chunk === '') {
-            break;
-        }
-
-        if (fwrite($destHandle, $chunk) === false) {
-            fclose($sourceHandle);
-            fclose($destHandle);
-            @unlink($destPath);
-            return false;
-        }
-
-        $bytesCopied += strlen($chunk);
-
-        if ($jobId !== null && $totalBytes > 0) {
-            $percent = (int)round(($bytesCopied / $totalBytes) * 100);
-            if ($percent >= $lastLoggedPercent + 5 || $percent === 100) {
-                $label = $relativePath !== null ? "- $codename - $relativePath ($percent%)" : "($percent%)";
-                logPushWorkerProgress($jobId, $label);
-                $lastLoggedPercent = $percent;
-            }
-        }
-    }
-
-    fclose($sourceHandle);
-    fclose($destHandle);
-
-    return true;
-}
-
-function verifyDirectoryCopyIntegrity($source, $dest, $jobId = null) {
-    if (!is_dir($source) || !is_dir($dest)) {
-        return false;
-    }
-
-    $sourceIterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS)
-    );
-
-    $verifiedFiles = 0;
-
-    foreach ($sourceIterator as $item) {
-        if (!$item->isFile()) {
-            continue;
-        }
-
-        $relativePath = $sourceIterator->getSubPathName();
-        $destPath = $dest . DIRECTORY_SEPARATOR . $relativePath;
-
-        if (!is_file($destPath)) {
-            return false;
-        }
-
-        if (filesize($item->getPathname()) !== filesize($destPath)) {
-            return false;
-        }
-
-        $verifiedFiles++;
-        if ($jobId !== null && $verifiedFiles % 100 === 0) {
-            logPushWorkerProgress($jobId, "verification progress: checked $verifiedFiles files");
-        }
-    }
-
-    if ($jobId !== null) {
-        logPushWorkerProgress($jobId, "verification progress: checked $verifiedFiles files total");
-    }
-
-    return true;
-}
-
-function removeDirectoryRecursively($path) {
-    $errors = [];
-
-    if (!is_dir($path)) {
+    if (trim((string)$rawInput) === '') {
         return [
             'success' => false,
-            'errors' => ["Path is not a directory: $path"]
+            'error' => 'No JSON payload provided',
         ];
     }
 
-    $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS),
-        RecursiveIteratorIterator::CHILD_FIRST
-    );
-
-    foreach ($iterator as $item) {
-        $itemPath = $item->getPathname();
-
-        if ($item->isLink()) {
-            if (!@unlink($itemPath)) {
-                $errors[] = "Failed to remove symlink: $itemPath";
-            }
-            continue;
-        }
-
-        if ($item->isDir()) {
-            if (!@rmdir($itemPath)) {
-                @chmod($itemPath, 0755);
-                if (!@rmdir($itemPath)) {
-                    $errors[] = "Failed to remove directory: $itemPath";
-                }
-            }
-        } else {
-            if (!@unlink($itemPath)) {
-                @chmod($itemPath, 0644);
-                if (!@unlink($itemPath)) {
-                    $errors[] = "Failed to remove file: $itemPath";
-                }
-            }
-        }
+    $decoded = json_decode((string)$rawInput, true);
+    if (!is_array($decoded)) {
+        return [
+            'success' => false,
+            'error' => 'Invalid JSON payload',
+        ];
     }
 
-    if (!@rmdir($path)) {
-        @chmod($path, 0755);
-        if (!@rmdir($path)) {
-            $errors[] = "Failed to remove root directory: $path";
+    return [
+        'success' => true,
+        'payload' => [
+            'codename' => (string)($decoded['codename'] ?? ''),
+            'date' => (string)($decoded['date'] ?? ''),
+            'version' => (string)($decoded['version'] ?? ''),
+            'buildType' => strtolower((string)($decoded['buildType'] ?? '')),
+            'callbackUrl' => (string)($decoded['callbackUrl'] ?? $decoded['webhookUrl'] ?? ''),
+        ],
+    ];
+}
+
+if (!function_exists('sendJsonWebhookRequest')) {
+    function sendJsonWebhookRequest($url, $payload) {
+        $responseBody = '';
+        $httpCode = 0;
+        $error = null;
+        $body = json_encode($payload);
+
+        if ($body === false) {
+            return [
+                'sent' => false,
+                'httpCode' => 0,
+                'error' => 'Failed to encode webhook payload',
+            ];
+        }
+
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'Content-Length: ' . strlen($body),
+            ]);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 20);
+
+            $response = curl_exec($ch);
+            if ($response === false) {
+                $error = curl_error($ch);
+            } else {
+                $responseBody = (string)$response;
+            }
+
+            $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+        } else {
+            $context = stream_context_create([
+                'http' => [
+                    'method' => 'POST',
+                    'header' => "Content-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\n",
+                    'content' => $body,
+                    'timeout' => 20,
+                    'ignore_errors' => true,
+                ],
+            ]);
+
+            $response = @file_get_contents($url, false, $context);
+            if ($response === false) {
+                $error = 'HTTP webhook failed (curl extension unavailable)';
+            } else {
+                $responseBody = (string)$response;
+            }
+
+            if (isset($http_response_header) && is_array($http_response_header)) {
+                foreach ($http_response_header as $headerLine) {
+                    if (preg_match('/HTTP\/\d\.\d\s+(\d{3})/', $headerLine, $matches)) {
+                        $httpCode = (int)$matches[1];
+                        break;
+                    }
+                }
+            }
+        }
+
+        if ($error === null && ($httpCode < 200 || $httpCode >= 300)) {
+            $error = 'Webhook returned HTTP ' . $httpCode;
+        }
+
+        return [
+            'sent' => $error === null,
+            'httpCode' => $httpCode,
+            'error' => $error,
+            'response' => substr($responseBody, 0, 1000),
+        ];
+    }
+}
+
+if (!function_exists('getPushSuccessDiscordWebhookConfig')) {
+    function getPushSuccessDiscordWebhookConfig() {
+        $url = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_URL') ?: ''));
+        $username = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_USERNAME') ?: 'Evolution X CDN'));
+        $avatarUrl = trim((string)(getenv('DISCORD_PUSH_SUCCESS_WEBHOOK_AVATAR_URL') ?: ''));
+
+        return [
+            'enabled' => $url !== '',
+            'url' => $url,
+            'username' => $username,
+            'avatarUrl' => $avatarUrl,
+        ];
+    }
+}
+
+if (!function_exists('getPushFailureDiscordWebhookConfig')) {
+    function getPushFailureDiscordWebhookConfig() {
+        $url = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_URL') ?: ''));
+        $username = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_USERNAME') ?: 'Evolution X CDN'));
+        $avatarUrl = trim((string)(getenv('DISCORD_PUSH_FAILURE_WEBHOOK_AVATAR_URL') ?: ''));
+
+        return [
+            'enabled' => $url !== '',
+            'url' => $url,
+            'username' => $username,
+            'avatarUrl' => $avatarUrl,
+        ];
+    }
+}
+
+if (!function_exists('triggerPushSuccessDiscordWebhook')) {
+    function triggerPushSuccessDiscordWebhook($job, $runResult) {
+        if (empty($runResult['success'])) {
+            return [
+                'sent' => false,
+                'skipped' => true,
+                'reason' => 'Job failed or not successful',
+            ];
+        }
+
+        $config = getPushSuccessDiscordWebhookConfig();
+        if (!$config['enabled']) {
+            return [
+                'sent' => false,
+                'skipped' => true,
+                'reason' => 'Discord success webhook disabled or URL missing',
+            ];
+        }
+
+        $jobId = (int)($job['id'] ?? 0);
+        $codename = $job['codename'] ?? 'unknown';
+        $version = $job['version'] ?? 'unknown';
+        $releaseDate = $job['release_date'] ?? 'unknown';
+        $buildType = $job['build_type'] ?? 'unknown';
+
+        $payload = [
+            'username' => $config['username'],
+            'content' => '',
+            'embeds' => [[
+                'title' => 'CDN Push Release - Success',
+                'description' => "Device: `{$codename}`\nVersion: `{$version}`\nBuild Date: `{$releaseDate}`\nType: `{$buildType}`\n\nOTA merge can now be completed.",
+                'color' => 5763719,
+            ]],
+            'allowed_mentions' => [
+                'parse' => ['users'],
+            ],
+        ];
+
+        if ($config['avatarUrl'] !== '') {
+            $payload['avatar_url'] = $config['avatarUrl'];
+        }
+
+        $result = sendJsonWebhookRequest($config['url'], $payload);
+        error_log('[push-worker] Discord success webhook result for job #' . $jobId . ': ' . json_encode($result));
+
+        return $result;
+    }
+}
+
+if (!function_exists('triggerPushFailureDiscordWebhook')) {
+    function triggerPushFailureDiscordWebhook($job, $runResult) {
+        if (!empty($runResult['success'])) {
+            return [
+                'sent' => false,
+                'skipped' => true,
+                'reason' => 'Job succeeded',
+            ];
+        }
+
+        $config = getPushFailureDiscordWebhookConfig();
+        if (!$config['enabled']) {
+            return [
+                'sent' => false,
+                'skipped' => true,
+                'reason' => 'Discord failure webhook disabled or URL missing',
+            ];
+        }
+
+        $jobId = (int)($job['id'] ?? 0);
+        $codename = $job['codename'] ?? 'unknown';
+        $version = $job['version'] ?? 'unknown';
+        $releaseDate = $job['release_date'] ?? 'unknown';
+        $buildType = $job['build_type'] ?? 'unknown';
+        $errorMessage = trim((string)($runResult['error'] ?? $job['error_message'] ?? 'Unknown push failure'));
+
+        $payload = [
+            'username' => $config['username'],
+            'content' => '',
+            'embeds' => [[
+                'title' => 'CDN Push Release - Failed',
+                'description' => "Device: `{$codename}`\nVersion: `{$version}`\nBuild Date: `{$releaseDate}`\nType: `{$buildType}`\n\nError: `{$errorMessage}`",
+                'color' => 15548997,
+                'footer' => [
+                    'text' => 'Job #' . $jobId,
+                ],
+            ]],
+            'allowed_mentions' => [
+                'parse' => ['users'],
+            ],
+        ];
+
+        if ($config['avatarUrl'] !== '') {
+            $payload['avatar_url'] = $config['avatarUrl'];
+        }
+
+        $embedResult = sendJsonWebhookRequest($config['url'], $payload);
+
+        $mentionPayload = [
+            'username' => $config['username'],
+            'content' => '<@180736511354863627> Please investigate ASAP',
+            'allowed_mentions' => [
+                'parse' => ['users'],
+            ],
+        ];
+
+        if ($config['avatarUrl'] !== '') {
+            $mentionPayload['avatar_url'] = $config['avatarUrl'];
+        }
+
+        $mentionResult = sendJsonWebhookRequest($config['url'], $mentionPayload);
+
+        $result = [
+            'sent' => ($embedResult['sent'] ?? false) && ($mentionResult['sent'] ?? false),
+            'httpCode' => $embedResult['httpCode'] ?? 0,
+            'error' => ($embedResult['error'] ?? null) ?: ($mentionResult['error'] ?? null),
+            'embed' => $embedResult,
+            'mention' => $mentionResult,
+        ];
+        error_log('[push-worker] Discord failure webhook result for job #' . $jobId . ': ' . json_encode($result));
+
+        return $result;
+    }
+}
+
+function push_new_validate_payload(array $payload) {
+    if (!isset($payload['codename'], $payload['date'], $payload['version'], $payload['buildType'])) {
+        return ['success' => false, 'APICode' => 'T-0002', 'error' => 'Missing required fields'];
+    }
+
+    $codename = trim((string)$payload['codename']);
+    $date = trim((string)$payload['date']);
+    $version = trim((string)$payload['version']);
+    $buildType = strtolower(trim((string)$payload['buildType']));
+
+    if ($codename === '' || $date === '' || $version === '' || $buildType === '') {
+        return ['success' => false, 'APICode' => 'T-0002', 'error' => 'Missing required values'];
+    }
+
+    if (!in_array($buildType, ['vanilla', 'gapps'], true)) {
+        return ['success' => false, 'APICode' => 'T-0002', 'error' => 'Invalid build type'];
+    }
+
+    $versionInt = (int)$version;
+    if (!preg_match('/^\d+$/', $version) || $versionInt < 1 || $versionInt > 99) {
+        return ['success' => false, 'APICode' => 'T-0002', 'error' => 'Invalid version'];
+    }
+
+    $dateObj = DateTime::createFromFormat('Y-m-d', $date);
+    if (!$dateObj || $dateObj->format('Y-m-d') !== $date) {
+        return ['success' => false, 'APICode' => 'T-0002', 'error' => 'Invalid date'];
+    }
+
+    return ['success' => true, 'codename' => $codename, 'date' => $date, 'version' => (string)$versionInt, 'buildType' => $buildType];
+}
+
+function push_new_duplicate_check($sourcePath) {
+    if (!class_exists('Database')) {
+        return null;
+    }
+
+    try {
+        $db = Database::getInstance()->getConnection();
+        $stmt = $db->prepare("SELECT id, status FROM push_release_queue WHERE source_path = ? AND status IN ('queued', 'processing') LIMIT 1");
+        $stmt->execute([$sourcePath]);
+        return $stmt->fetch() ?: null;
+    } catch (Throwable $e) {
+        push_new_log('Duplicate source lookup failed: ' . $e->getMessage());
+        return null;
+    }
+}
+
+function push_new_build_discord_job_context($codename, $date, $version, $buildType, $jobId = 0) {
+    return [
+        'id' => (int)$jobId,
+        'codename' => trim((string)$codename),
+        'release_date' => trim((string)$date),
+        'version' => trim((string)$version),
+        'build_type' => strtolower(trim((string)$buildType)),
+    ];
+}
+
+function push_new_process_request(array $payload) {
+    $validation = push_new_validate_payload($payload);
+    if (!$validation['success']) {
+        return [
+            'status' => 'error',
+            'APICode' => $validation['APICode'],
+            'message' => $validation['error'],
+        ];
+    }
+
+    $codename = $validation['codename'];
+    $date = $validation['date'];
+    $version = $validation['version'];
+    $buildType = $validation['buildType'];
+    $sourceDate = str_replace('-', '', $date);
+    $callbackUrl = trim((string)($payload['callbackUrl'] ?? ''));
+
+    $jobContext = push_new_build_discord_job_context($codename, $date, $version, $buildType);
+    $sourcePath = push_new_resolve_source_directory($codename, (int)$version, $sourceDate, $buildType);
+    if ($sourcePath === null) {
+        $failureHook = triggerPushFailureDiscordWebhook($jobContext, ['success' => false, 'error' => 'Source directory not found']);
+        push_new_log('Failure Discord webhook: ' . json_encode($failureHook));
+
+        return [
+            'status' => 'error',
+            'APICode' => 'T-0005',
+            'message' => 'Source directory not found',
+        ];
+    }
+
+    $duplicate = push_new_duplicate_check($sourcePath);
+    if ($duplicate !== null) {
+        $failureHook = triggerPushFailureDiscordWebhook($jobContext, ['success' => false, 'error' => 'Duplicate push request for this source path already exists']);
+        push_new_log('Failure Discord webhook: ' . json_encode($failureHook));
+
+        return [
+            'status' => 'duplicate',
+            'APICode' => 'T-0008',
+            'message' => 'Duplicate push request for this source path already exists',
+            'jobId' => (int)($duplicate['id'] ?? 0),
+            'queueStatus' => (string)($duplicate['status'] ?? 'unknown'),
+        ];
+    }
+
+    $stagedPath = push_new_stage_source_to_tmp($sourcePath, $codename, (int)$version, $buildType, $sourceDate);
+    if ($stagedPath === null) {
+        $failureHook = triggerPushFailureDiscordWebhook($jobContext, ['success' => false, 'error' => 'Failed to stage source directory from BackBlaze']);
+        push_new_log('Failure Discord webhook: ' . json_encode($failureHook));
+
+        return [
+            'status' => 'error',
+            'APICode' => 'T-0005',
+            'message' => 'Failed to stage source directory from BackBlaze',
+        ];
+    }
+
+    $destinationPath = ($buildType === 'gapps')
+        ? '/' . trim((string)$codename, '/') . '/' . (string)(int)$version
+        : '/' . trim((string)$codename, '/') . '/' . (string)(int)$version . '_vanilla';
+
+    if (!push_new_upload_directory_to_bunny($stagedPath, $destinationPath)) {
+        $failureHook = triggerPushFailureDiscordWebhook($jobContext, ['success' => false, 'error' => 'Bunny upload failed']);
+        push_new_log('Failure Discord webhook: ' . json_encode($failureHook));
+
+        return [
+            'status' => 'error',
+            'APICode' => 'T-0006',
+            'message' => 'Bunny upload failed',
+        ];
+    }
+
+    if (!push_new_verify_bunny_upload($stagedPath, $destinationPath)) {
+        $failureHook = triggerPushFailureDiscordWebhook($jobContext, ['success' => false, 'error' => 'Bunny upload verification failed']);
+        push_new_log('Failure Discord webhook: ' . json_encode($failureHook));
+
+        return [
+            'status' => 'error',
+            'APICode' => 'T-0006',
+            'message' => 'Bunny upload verification failed',
+        ];
+    }
+
+    $webhookPayload = [
+        'status' => 'success',
+        'APICode' => 'T-0007',
+        'message' => 'Push completed successfully',
+        'codename' => $codename,
+        'date' => $date,
+        'version' => $version,
+        'buildType' => $buildType,
+        'sourcePath' => $sourcePath,
+        'destPath' => $destinationPath,
+    ];
+
+    $webhookResult = push_new_post_webhook_update($callbackUrl, $webhookPayload);
+    if (!$webhookResult) {
+        push_new_log('Webhook update failed for codename=' . $codename . ' destination=' . $destinationPath);
+    }
+
+    $successHook = triggerPushSuccessDiscordWebhook($jobContext, ['success' => true]);
+    push_new_log('Success Discord webhook: ' . json_encode($successHook));
+
+    if (is_dir($stagedPath)) {
+        $cleanup = removeDirectoryRecursively($stagedPath);
+        if (!$cleanup['success']) {
+            push_new_log('Staging cleanup failed: ' . $stagedPath);
         }
     }
 
     return [
-        'success' => empty($errors),
-        'errors' => $errors
+        'status' => 'success',
+        'APICode' => 'T-0007',
+        'message' => 'Push completed successfully',
+        'sourcePath' => $sourcePath,
+        'stagedPath' => $stagedPath,
+        'destPath' => $destinationPath,
+        'webhookDelivered' => $webhookResult,
+        'discordWebhook' => $successHook,
     ];
 }
 
-function clearHashesForPath($path) {
-    try {
-        $db = Database::getInstance();
-        $pdo = $db->getConnection();
+function handlePushNewApi($method, $pathParts = []) {
+    if ($method !== 'POST') {
+        return push_new_json_response([
+            'status' => 'error',
+            'APICode' => 'T-0002',
+            'message' => 'Method not allowed',
+        ], 405);
+    }
 
-        if (strpos($path, BASE_PATH) === 0) {
-            $relativePath = '/' . ltrim(str_replace(BASE_PATH, '', $path), '/');
-        } else {
-            $relativePath = ltrim($path, '/');
+    if (!push_new_is_authorized()) {
+        return push_new_json_response([
+            'status' => 'error',
+            'APICode' => 'T-0003',
+            'message' => 'Unauthorized',
+        ], 401);
+    }
+
+    $rawInput = file_get_contents('php://input');
+    $parsed = push_new_parse_request($rawInput, $pathParts);
+    if (!$parsed['success']) {
+        return push_new_json_response([
+            'status' => 'error',
+            'APICode' => 'T-0002',
+            'message' => $parsed['error'],
+        ], 400);
+    }
+
+    try {
+        $result = push_new_process_request($parsed['payload']);
+        $code = $result['APICode'] ?? 'T-0006';
+
+        $statusCodeMap = [
+            'T-0002' => 400,
+            'T-0003' => 401,
+            'T-0005' => 404,
+            'T-0006' => 500,
+            'T-0007' => 200,
+            'T-0008' => 409,
+        ];
+
+        return push_new_json_response($result, $statusCodeMap[$code] ?? 200);
+    } catch (Throwable $e) {
+        push_new_log('Unhandled exception: ' . $e->getMessage());
+        return push_new_json_response([
+            'status' => 'error',
+            'APICode' => 'T-0006',
+            'message' => 'Push execution failed',
+        ], 500);
+    }
+}
+
+if (!function_exists('normalizePushDestinationPath')) {
+    function normalizePushDestinationPath($path) {
+        $path = trim((string)$path);
+        if ($path === '') {
+            return '/';
         }
 
-        $keyColumn = (defined('DB_TYPE') && DB_TYPE === 'mysql') ? '`key`' : 'key_path';
+        if (strpos($path, BASE_PATH) === 0) {
+            $path = '/' . ltrim(str_replace(BASE_PATH, '', $path), '/');
+        }
 
-        $stmt = $pdo->prepare("UPDATE download_stat SET `sha256` = NULL, `md5` = NULL WHERE $keyColumn LIKE ?");
-        $stmt->execute([$relativePath . '/%']);
+        return '/' . trim(str_replace('\\', '/', $path), '/');
+    }
+}
 
-        $clearedCount = $stmt->rowCount();
-        error_log("Cleared hashes for $clearedCount entries in path: $relativePath");
+if (!function_exists('getDatabaseNowExpression')) {
+    function getDatabaseNowExpression() {
+        return (defined('DB_TYPE') && DB_TYPE === 'mysql') ? 'NOW()' : 'CURRENT_TIMESTAMP';
+    }
+}
 
-        return $clearedCount;
-    } catch (Exception $e) {
-        error_log('Error clearing hashes for path ' . $path . ': ' . $e->getMessage());
-        return false;
+if (!function_exists('findPushQueueJobBySourcePath')) {
+    function findPushQueueJobBySourcePath($db, $sourcePath) {
+        $stmt = $db->prepare('SELECT id, status FROM push_release_queue WHERE source_path = ? ORDER BY id DESC LIMIT 1');
+        $stmt->execute([$sourcePath]);
+        return $stmt->fetch() ?: null;
+    }
+}
+
+if (!function_exists('markPushQueueJobAsProcessing')) {
+    function markPushQueueJobAsProcessing($db, $jobId) {
+        $nowExpr = getDatabaseNowExpression();
+        $stmt = $db->prepare("UPDATE push_release_queue SET status = 'processing', started_at = $nowExpr, updated_at = $nowExpr WHERE id = ? AND status = 'queued'");
+        $stmt->execute([$jobId]);
+        return $stmt->rowCount() === 1;
+    }
+}
+
+if (!function_exists('completePushQueueJob')) {
+    function completePushQueueJob($db, $jobId, $success, $errorMessage = null) {
+        $nowExpr = getDatabaseNowExpression();
+        $finalStatus = $success ? 'completed' : 'failed';
+        $stmt = $db->prepare("UPDATE push_release_queue SET status = '$finalStatus', success = ?, error_message = ?, completed_at = $nowExpr, updated_at = $nowExpr WHERE id = ?");
+        $stmt->execute([$success ? 1 : 0, $errorMessage, $jobId]);
+    }
+}
+
+if (!function_exists('getPushQueueJobById')) {
+    function getPushQueueJobById($db, $jobId) {
+        $stmt = $db->prepare('SELECT * FROM push_release_queue WHERE id = ? LIMIT 1');
+        $stmt->execute([$jobId]);
+        return $stmt->fetch();
+    }
+}
+
+if (!function_exists('executeQueuedPushReleaseJob')) {
+    function executeQueuedPushReleaseJob($job) {
+        $jobId = (int)($job['id'] ?? 0);
+        $sourcePath = trim((string)($job['source_path'] ?? ''));
+        $destPath = normalizePushDestinationPath((string)($job['destination_path'] ?? ''));
+        $codename = trim((string)($job['codename'] ?? 'unknown'));
+        $releaseDate = trim((string)($job['release_date'] ?? ''));
+        $buildType = strtolower(trim((string)($job['build_type'] ?? '')));
+        $version = trim((string)($job['version'] ?? ''));
+
+        if ($jobId <= 0) {
+            return ['success' => false, 'error' => 'Invalid push job'];
+        }
+
+        foreach (['codename', 'release_date', 'version', 'build_type'] as $field) {
+            if (!isset($job[$field])) {
+                return ['success' => false, 'error' => 'Missing queue field: ' . $field];
+            }
+        }
+
+        $workingSourcePath = $sourcePath;
+        $stagedFromRemote = false;
+
+        if (!is_dir($workingSourcePath) || !is_readable($workingSourcePath)) {
+            if ($codename !== '' && $releaseDate !== '' && $version !== '' && in_array($buildType, ['vanilla', 'gapps'], true)) {
+                $dateValue = str_replace('-', '', $releaseDate);
+                $workingSourcePath = push_new_stage_source_to_tmp(
+                    push_new_resolve_source_directory($codename, (int)$version, $dateValue, $buildType) ?? $sourcePath,
+                    $codename,
+                    (int)$version,
+                    $buildType,
+                    $dateValue
+                );
+                $stagedFromRemote = true;
+
+                if ($workingSourcePath === null) {
+                    return ['success' => false, 'error' => 'Source directory not found: ' . $sourcePath];
+                }
+            } else {
+                return ['success' => false, 'error' => 'Source directory not found: ' . $sourcePath];
+            }
+        }
+
+        if (!push_new_verify_staged_directory($workingSourcePath)) {
+            return ['success' => false, 'error' => 'Source directory verification failed: ' . $workingSourcePath];
+        }
+
+        $uploadResult = push_new_upload_directory_to_bunny($workingSourcePath, $destPath);
+        if (!$uploadResult) {
+            return ['success' => false, 'error' => 'Bunny upload failed for job #'.$jobId];
+        }
+
+        if (!push_new_verify_bunny_upload($workingSourcePath, $destPath)) {
+            return ['success' => false, 'error' => 'Bunny upload verification failed for job #'.$jobId];
+        }
+
+        if ($stagedFromRemote && is_dir($workingSourcePath)) {
+            $cleanup = removeDirectoryRecursively($workingSourcePath);
+            if (!$cleanup['success']) {
+                push_new_log('Queue cleanup failed for ' . $workingSourcePath);
+            }
+        }
+
+        return ['success' => true, 'error' => null];
+    }
+}
+
+if (!function_exists('processNextQueuedPushReleaseJob')) {
+    function processNextQueuedPushReleaseJob() {
+        $lockPath = sys_get_temp_dir() . '/php_filebrowser_push_queue.lock';
+        $lockHandle = fopen($lockPath, 'c');
+        if ($lockHandle === false) {
+            return ['success' => false, 'status' => 'lock_error', 'message' => 'Unable to create worker lock file'];
+        }
+
+        if (!flock($lockHandle, LOCK_EX | LOCK_NB)) {
+            fclose($lockHandle);
+            return ['success' => true, 'status' => 'worker_busy', 'message' => 'Push queue worker already running'];
+        }
+
+        try {
+            $db = Database::getInstance()->getConnection();
+
+            $processingStmt = $db->query("SELECT id FROM push_release_queue WHERE status = 'processing' ORDER BY started_at ASC, id ASC LIMIT 1");
+            $processingJob = $processingStmt->fetch();
+            if ($processingJob) {
+                return ['success' => true, 'status' => 'already_processing', 'jobId' => (int)$processingJob['id'], 'message' => 'A push job is already processing'];
+            }
+
+            $queuedStmt = $db->query("SELECT id FROM push_release_queue WHERE status = 'queued' ORDER BY id ASC LIMIT 1");
+            $queuedJob = $queuedStmt->fetch();
+            if (!$queuedJob) {
+                return ['success' => true, 'status' => 'idle', 'message' => 'No queued push jobs'];
+            }
+
+            $jobId = (int)$queuedJob['id'];
+            if (!markPushQueueJobAsProcessing($db, $jobId)) {
+                return ['success' => true, 'status' => 'race_lost', 'message' => 'Queued job was claimed by another worker'];
+            }
+
+            $job = getPushQueueJobById($db, $jobId);
+            if (!$job) {
+                return ['success' => false, 'status' => 'missing_job', 'message' => 'Failed to load claimed queue job'];
+            }
+
+            try {
+                $runResult = executeQueuedPushReleaseJob($job);
+            } catch (Throwable $e) {
+                $runResult = ['success' => false, 'error' => $e->getMessage()];
+            }
+
+            completePushQueueJob($db, $jobId, (bool)($runResult['success'] ?? false), $runResult['error'] ?? null);
+
+            $discordWebhookResult = ['sent' => false, 'skipped' => true, 'reason' => 'Discord failure webhook disabled or URL missing'];
+            $successDiscordWebhookResult = ['sent' => false, 'skipped' => true, 'reason' => 'Discord success webhook disabled or URL missing'];
+
+            try {
+                $discordWebhookResult = triggerPushFailureDiscordWebhook($job, $runResult);
+            } catch (Throwable $e) {
+                $discordWebhookResult = [
+                    'sent' => false,
+                    'error' => $e->getMessage(),
+                    'skipped' => false,
+                ];
+                push_new_log('Discord failure webhook failed for job #' . $jobId . ': ' . $e->getMessage());
+            }
+
+            try {
+                $successDiscordWebhookResult = triggerPushSuccessDiscordWebhook($job, $runResult);
+            } catch (Throwable $e) {
+                $successDiscordWebhookResult = [
+                    'sent' => false,
+                    'error' => $e->getMessage(),
+                    'skipped' => false,
+                ];
+                push_new_log('Discord success webhook failed for job #' . $jobId . ': ' . $e->getMessage());
+            }
+
+            return [
+                'success' => true,
+                'status' => ($runResult['success'] ?? false) ? 'processed' : 'failed',
+                'jobId' => $jobId,
+                'jobSuccess' => (bool)($runResult['success'] ?? false),
+                'message' => ($runResult['success'] ?? false) ? 'Push job completed' : 'Push job failed',
+                'callback' => ['sent' => false, 'skipped' => true, 'reason' => 'Callback disabled'],
+                'discordWebhook' => $discordWebhookResult,
+                'successDiscordWebhook' => $successDiscordWebhookResult,
+            ];
+        } catch (Throwable $e) {
+            return ['success' => false, 'status' => 'error', 'message' => $e->getMessage()];
+        } finally {
+            flock($lockHandle, LOCK_UN);
+            fclose($lockHandle);
+        }
+    }
+}
+
+if (!function_exists('removeDirectoryRecursively')) {
+    function removeDirectoryRecursively($directory) {
+        if (!is_dir($directory)) {
+            return ['success' => true, 'errors' => []];
+        }
+
+        $errors = [];
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($directory, RecursiveDirectoryIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+
+        foreach ($iterator as $item) {
+            try {
+                if ($item->isDir()) {
+                    @rmdir($item->getPathname());
+                } else {
+                    @unlink($item->getPathname());
+                }
+            } catch (Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+
+        try {
+            @rmdir($directory);
+        } catch (Throwable $e) {
+            $errors[] = $e->getMessage();
+        }
+
+        return ['success' => empty($errors), 'errors' => $errors];
     }
 }

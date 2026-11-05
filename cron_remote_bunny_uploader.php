@@ -14,7 +14,7 @@
  *
  * Optional args:
  *   --dry-run
- *   --roots=/mnt/pre-release
+ *   --roots=/mnt/backblaze
  *   --stable-seconds=30
  *   --state-file=/var/lib/remote_bunny_uploader/state.json
  *   --log-file=/var/log/remote_bunny_uploader.log
@@ -76,7 +76,9 @@ ru_load_env();
 date_default_timezone_set(getenv('TZ') ?: 'UTC');
 
 $config = [
-    'watch_roots' => array_values(array_filter(array_map('trim', explode(',', (string)(getenv('REMOTE_UPLOAD_WATCH_ROOTS') ?: '/mnt/pre-release'))))),
+    'watch_roots' => array_values(array_filter(array_map('trim', explode(',', (string)(getenv('REMOTE_UPLOAD_WATCH_ROOTS') ?: getenv('BACKBLAZE_SOURCE_ROOT') ?: getenv('B2_SOURCE_ROOT') ?: getenv('B2_MOUNT_PATH') ?: ''))), static function ($root) {
+        return $root !== '';
+    })),
     'stable_seconds' => max(1, (int)(getenv('REMOTE_UPLOAD_STABLE_SECONDS') ?: 30)),
     'state_file' => (string)(getenv('REMOTE_UPLOAD_STATE_FILE') ?: __DIR__ . '/data/cache/remote_bunny_uploader_state.json'),
     'lock_file' => (string)(getenv('REMOTE_UPLOAD_LOCK_FILE') ?: __DIR__ . '/data/cache/remote_bunny_uploader.lock'),
