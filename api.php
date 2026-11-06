@@ -27,6 +27,7 @@ function setCorsHeaders() {
     
     // Allow specific origins in production
     $allowedOrigins = [
+	'https://mm-dashboard.evolution-x.org',
         'https://evolution-x.org',
         'https://cdn.evolution-x.org',
         'http://localhost:3000',
